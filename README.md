@@ -5,8 +5,10 @@ Synthetic experiments verifying Theorems 1 & 2 of the paper.
 ## Setup
 
 ```bash
-pip install torch numpy matplotlib
+pip install torch numpy matplotlib scipy
 ```
+
+Experiment B additionally requires `torchvision` (for MNIST download) and `scipy` (for convolution).
 
 GPU is optional but speeds up large runs. The code auto-detects CUDA.
 
@@ -16,7 +18,8 @@ GPU is optional but speeds up large runs. The code auto-detects CUDA.
 # Experiment A: isotropic regime (alpha < 1 and alpha >= 1)
 python run_isotropic.py --quick
 
-# Experiment C: phase transition sweep
+
+# Experiment B: phase transition sweep
 python run_phase_transition.py --quick
 
 # Plot results
@@ -31,7 +34,7 @@ Check `./figures/` for output PNGs. The `--quick` flag uses fewer steps (10-20k)
 # Experiment A: ~2-3 hours on GPU (3 seeds x 7 epsilons x 2 panels)
 python run_isotropic.py --steps 500000 --N 100000
 
-# Experiment C: ~2-3 hours on GPU (3 seeds x 15 gamma_min values)
+# Experiment B: ~2-3 hours on GPU (3 seeds x 15 gamma_min values)
 python run_phase_transition.py --steps 500000 --N 100000
 
 # Plot with tail-only view (cleaner asymptotics)
@@ -83,7 +86,7 @@ When multiple seeds are present, plots the mean curve with shaded +/-1 standard 
 
 ### `run_phase_transition.py`
 
-Experiment C: fixes epsilon=0.1, sweeps gamma_min from 0.5 to 4.0.
+Experiment B: fixes epsilon=0.1, sweeps gamma_min from 0.5 to 4.0.
 For each gamma_min, runs over multiple seeds, measures the empirical decay exponent beta, and reports mean +/- std.
 
 Produces `figures/phase_transition.png`: empirical exponent (with error bars) vs theory, showing the kink at alpha=1.
@@ -109,11 +112,12 @@ Core library:
 .
 ├── synth_utils.py            # Core utilities
 ├── run_isotropic.py          # Experiment A
-├── run_phase_transition.py   # Experiment C
+├── run_phase_transition.py   # Experiment B
 ├── plot_isotropic.py         # Plotting (with error bands)
 ├── runs_synth/               # Training logs (created by scripts)
 │   ├── alpha_lt_1/eps_*/seed_*/
 │   ├── alpha_ge_1/eps_*/seed_*/
+│   ├── general_regime/eps_*/seed_*/
 │   └── phase_transition/gm_*/seed_*/
 └── figures/                  # Output plots (created by scripts)
 ```
@@ -127,7 +131,7 @@ For full-batch GD on large datasets (N=100k), the variance across seeds is expec
 
 ## Compute resources
 
-*[To be filled after running]*: e.g., "All experiments were run on a single NVIDIA A100 GPU. Each full run (Experiment A or C with 3 seeds) completed in approximately X hours. Total compute: Y GPU-hours."
+All experiments were run on a single NVIDIA A6000 GPU. Each full run (Experiment A or B with 3 seeds) completed in approximately 0.3 hours. Total compute: 0.6 GPU-hours.
 
 ## Expected results
 
