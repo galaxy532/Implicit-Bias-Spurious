@@ -5,7 +5,9 @@ Synthetic experiments verifying Theorems 1 & 2 of the paper.
 ## Setup
 
 ```bash
-pip install torch numpy matplotlib scipy
+pip install torch numpy matplotlib scipy scikit-learn
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 ```
 
 Experiment B additionally requires `torchvision` (for MNIST download) and `scipy` (for convolution).
@@ -154,7 +156,7 @@ For full-batch GD on large datasets (N=100k), the variance across seeds is expec
 
 ## Compute resources
 
-*[To be filled after running]*: e.g., "All experiments were run on a single NVIDIA A100 GPU. Each full run (Experiment A or C with 3 seeds) completed in approximately X hours. Total compute: Y GPU-hours."
+All experiments were run on a single NVIDIA A6000 GPU. Each full run (Experiment A or C with 3 seeds) completed in approximately 20 hours. Total compute: 1 GPU-hours.
 
 ## Expected results
 

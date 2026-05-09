@@ -5,7 +5,9 @@ Synthetic experiments verifying Theorems 1 & 2 of the paper.
 ## Setup
 
 ```bash
-pip install torch numpy matplotlib scipy
+pip install torch numpy matplotlib scipy scikit-learn
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 ```
 
 Experiment B additionally requires `torchvision` (for MNIST download) and `scipy` (for convolution).
@@ -18,8 +20,10 @@ GPU is optional but speeds up large runs. The code auto-detects CUDA.
 # Experiment A: isotropic regime (alpha < 1 and alpha >= 1)
 python run_isotropic.py --quick
 
+# Experiment B: general regime on MNIST (convolution-based)
+python run_general_regime.py --quick
 
-# Experiment B: phase transition sweep
+# Experiment C: phase transition sweep
 python run_phase_transition.py --quick
 
 # Plot results
@@ -34,7 +38,10 @@ Check `./figures/` for output PNGs. The `--quick` flag uses fewer steps (10-20k)
 # Experiment A: ~2-3 hours on GPU (3 seeds x 7 epsilons x 2 panels)
 python run_isotropic.py --steps 500000 --N 100000
 
-# Experiment B: ~2-3 hours on GPU (3 seeds x 15 gamma_min values)
+# Experiment B: ~1-2 hours on GPU (3 seeds x 5 epsilons, MNIST 70k images)
+python run_general_regime.py --steps 200000
+
+# Experiment C: ~2-3 hours on GPU (3 seeds x 15 gamma_min values)
 python run_phase_transition.py --steps 500000 --N 100000
 
 # Plot with tail-only view (cleaner asymptotics)
@@ -86,7 +93,7 @@ When multiple seeds are present, plots the mean curve with shaded +/-1 standard 
 
 ### `run_phase_transition.py`
 
-Experiment B: fixes epsilon=0.1, sweeps gamma_min from 0.5 to 4.0.
+Experiment C: fixes epsilon=0.1, sweeps gamma_min from 0.5 to 4.0.
 For each gamma_min, runs over multiple seeds, measures the empirical decay exponent beta, and reports mean +/- std.
 
 Produces `figures/phase_transition.png`: empirical exponent (with error bars) vs theory, showing the kink at alpha=1.
@@ -95,6 +102,23 @@ Produces `figures/phase_transition.png`: empirical exponent (with error bars) vs
 - `--quick`: fast version (7 values of gamma_min)
 - `--plot_only`: re-plot from saved results without re-training
 - `--epsilon E`: minority fraction (default 0.1)
+- `--seeds 1 2 3 4 5`: random seeds for error bars (default: [1, 2, 3])
+
+### `run_general_regime.py`
+
+Experiment B: general regime validation on MNIST with convolution-based spurious features.
+Uses raw 28×28 MNIST digit images as core features r, and generates spurious features s by applying group-specific directional Gaussian blur convolutions (horizontal for majority, vertical for minority) plus noise.
+
+Steps: (1) build convolution kernels, (2) load MNIST, (3) generate s = Conv(r, kernel) + noise per group, (4) regress s on r to estimate A, B and verify R^2, (5) analyze regime (confirm non-isotropic), (6) train linear logistic GD on x = [r; s], (7) plot per-group error decay.
+
+Produces `figures/general_regime_{group}_error_decay.png` and `figures/general_regime_analysis.png`.
+
+**CLI options:**
+- `--quick`: fast version (3 epsilons, 10k steps)
+- `--plot_only`: re-plot from saved results without re-training
+- `--noise_std F`: noise added to convolved features (default 0.05)
+- `--kernel_size N`: convolution kernel size (default 7)
+- `--kernel_sigma F`: Gaussian sigma (default 2.0)
 - `--seeds 1 2 3 4 5`: random seeds for error bars (default: [1, 2, 3])
 
 ### `synth_utils.py`
@@ -112,7 +136,8 @@ Core library:
 .
 ├── synth_utils.py            # Core utilities
 ├── run_isotropic.py          # Experiment A
-├── run_phase_transition.py   # Experiment B
+├── run_general_regime.py     # Experiment B
+├── run_phase_transition.py   # Experiment C
 ├── plot_isotropic.py         # Plotting (with error bands)
 ├── runs_synth/               # Training logs (created by scripts)
 │   ├── alpha_lt_1/eps_*/seed_*/
@@ -131,7 +156,7 @@ For full-batch GD on large datasets (N=100k), the variance across seeds is expec
 
 ## Compute resources
 
-All experiments were run on a single NVIDIA A6000 GPU. Each full run (Experiment A or B with 3 seeds) completed in approximately 0.3 hours. Total compute: 0.6 GPU-hours.
+All experiments were run on a single NVIDIA A6000 GPU. Each full run (Experiment A or C with 3 seeds) completed in approximately 20 hours. Total compute: 1 GPU-hours.
 
 ## Expected results
 
