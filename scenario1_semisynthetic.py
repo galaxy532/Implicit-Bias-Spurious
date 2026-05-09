@@ -1,32 +1,34 @@
 """
-scenario1_semisynthetic.py — Semi-synthetic sanity check for the Δ_i partition pipeline
+scenario1_semisynthetic.py — Semi-synthetic isotropic-regime verification
 
-Validates the methodology for discovering the isotropic regime in learned
-representations.  We generate synthetic data with KNOWN feature-mediated
-spurious structure (isotropic regime), train an MLP, then apply the full
-analysis pipeline on the learned representations.
+Validates the full pipeline: generate synthetic data with KNOWN
+feature-mediated spurious structure (isotropic regime), train a
+single-hidden-layer MLP, extract representations, recover the
+isotropic parameters, then run full-batch GD on the representations
+and compare the observed error decay with the theorem's predictions.
 
 Pipeline:
-  1. Generate synthetic data with known (A, B, v, μ_A, μ_B, μ)
-  2. Train a small MLP on x = [r; s]
-  3. Extract penultimate-layer representations Φ(x)
-  4. Compute group-sensitivity Δ_i for each coordinate of Φ
-  5. Partition Φ into r̃ (low Δ) and s̃ (high Δ)
-  6. Fit Â, B̂ by group-wise linear regression
-  7. Compute v̂ (max-margin direction on r̃)
-  8. Check isotropic condition on (Â, B̂, v̂)
-  9. Project onto isotropic constraint, measure residual
-  10. Compare recovered α with the ground truth
+  1.  Generate synthetic data with known (A, B, v, μ_A, μ_B, μ)
+  2.  Train single-hidden-layer MLP on x = [r; s]
+  3.  Extract penultimate-layer representations Φ(x)
+  4.  Compute group-sensitivity Δ_i for each coordinate of Φ
+  5.  Partition Φ into r̃ (low Δ) and s̃ (high Δ)
+  6.  Fit Â, B̂ by group-wise linear regression
+  7.  Compute v̂ (max-margin direction on r̃)
+  8.  Check isotropic condition on (Â, B̂, v̂), project if needed
+  9.  Full-batch GD on x̃ = [r̃; s̃_proj] — track error decay
+  10. Compare empirical error decay with theoretical κ_g predictions
 
 Usage:
     python scenario1_semisynthetic.py
     python scenario1_semisynthetic.py --d_r 16 --d_s 16 --hidden_dim 128
+    python scenario1_semisynthetic.py --steps_gd 2000000 --lr_gd 0.01
+    python scenario1_semisynthetic.py --gamma_min 1.5 --mu 0.3 --steps_gd 1000000
 """
 
 import argparse
 import json
 import math
-import time
 from pathlib import Path
 
 import numpy as np
@@ -61,12 +63,17 @@ def get_config():
     p.add_argument('--N', type=int, default=20000)
     p.add_argument('--seed', type=int, default=42)
 
-    # MLP
+    # MLP (single hidden layer)
     p.add_argument('--hidden_dim', type=int, default=64)
-    p.add_argument('--n_layers', type=int, default=3)
     p.add_argument('--lr_mlp', type=float, default=1e-3)
-    p.add_argument('--steps_mlp', type=int, default=10000)
+    p.add_argument('--steps_mlp', type=int, default=50000)
     p.add_argument('--batch_size', type=int, default=512)
+
+    # GD on learned representations
+    p.add_argument('--lr_gd', type=float, default=0.01,
+                   help='Learning rate for full-batch GD on representations')
+    p.add_argument('--steps_gd', type=int, default=1000000,
+                   help='Number of GD steps on learned representations')
 
     # Δ partition
     p.add_argument('--delta_quantile', type=float, default=0.5,
@@ -146,12 +153,10 @@ def generate_data(cfg, A, B, v):
 # ===========================================================
 
 class MLP(nn.Module):
-    def __init__(self, d_in, d_hid, n_layers):
+    """Single hidden layer MLP (preserves more spectral structure than deep nets)."""
+    def __init__(self, d_in, d_hid):
         super().__init__()
-        layers = [nn.Linear(d_in, d_hid), nn.ReLU()]
-        for _ in range(n_layers - 2):
-            layers += [nn.Linear(d_hid, d_hid), nn.ReLU()]
-        self.features = nn.Sequential(*layers)
+        self.features = nn.Sequential(nn.Linear(d_in, d_hid), nn.ReLU())
         self.head = nn.Linear(d_hid, 1)
 
     def forward(self, x):
@@ -166,7 +171,7 @@ def train_mlp(x_np, cfg):
     X = torch.from_numpy(x_np).float().to(dev)
     N = len(X)
 
-    model = MLP(X.shape[1], cfg.hidden_dim, cfg.n_layers).to(dev)
+    model = MLP(X.shape[1], cfg.hidden_dim).to(dev)
     opt = optim.Adam(model.parameters(), lr=cfg.lr_mlp)
 
     for step in range(1, cfg.steps_mlp + 1):
@@ -174,7 +179,7 @@ def train_mlp(x_np, cfg):
         logits = model(X[idx])
         loss = torch.log1p(torch.exp(-logits)).mean()   # absorbed: y=+1
         opt.zero_grad(); loss.backward(); opt.step()
-        if step % 2000 == 0 or step == 1:
+        if step % 5000 == 0 or step == 1:
             print(f"    [MLP step {step:>6d}]  loss = {loss.item():.6f}")
 
     model.eval()
@@ -278,6 +283,107 @@ def compute_v_qp(phi_r):
 
 
 # ===========================================================
+#  Full-batch GD on learned representations
+# ===========================================================
+
+def train_gd_on_representations(phi_r, phi_s, groups, A_op, B_op, cfg):
+    """
+    Full-batch GD with logistic loss on x̃ = [ϕ_r; ϕ_s].
+    Label-absorbed: y = +1 for all samples, loss = log(1 + exp(-w^T x̃)).
+
+    Uses A_op, B_op (the isotropic-projected operators) to reconstruct
+    s̃_proj = A_op r̃  (majority) or B_op r̃  (minority), then trains on
+    x̃ = [r̃; s̃_proj].  This ensures the GD dynamics see data that
+    (approximately) satisfies the isotropic regime.
+
+    Returns: logs dict with trajectories, final weight vector.
+    """
+    dev = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    # Reconstruct s from projected operators so isotropic condition holds
+    N = phi_r.shape[0]
+    maj = (groups == 0)
+    minn = (groups == 1)
+    s_proj = np.zeros_like(phi_s)
+    s_proj[maj]  = phi_r[maj]  @ A_op.T
+    s_proj[minn] = phi_r[minn] @ B_op.T
+
+    x_tilde = np.concatenate([phi_r, s_proj], axis=1)
+    X = torch.from_numpy(x_tilde).float().to(dev)
+    n_maj = maj.sum()
+    n_min = minn.sum()
+    maj_t = torch.from_numpy(maj).to(dev)
+    min_t = torch.from_numpy(minn).to(dev)
+
+    d = X.shape[1]
+    w = torch.zeros(d, device=dev)
+
+    log_every = max(cfg.steps_gd // 2000, 1)
+    print_every = max(cfg.steps_gd // 10, 1)
+
+    logs = {"t": [], "err_maj": [], "err_min": [],
+            "err_maj_rescaled": [], "err_min_rescaled": [], "loss": []}
+
+    eps = cfg.epsilon
+    for t in range(1, cfg.steps_gd + 1):
+        logit = X @ w
+        sigmoid_pos = torch.sigmoid(logit)
+        q = 1.0 - sigmoid_pos
+
+        grad = X.T @ q / N
+        w = w + cfg.lr_gd * grad
+
+        if (t % log_every == 0) or t == 1:
+            with torch.no_grad():
+                err_maj = q[maj_t].mean().item() if n_maj > 0 else float('nan')
+                err_min = q[min_t].mean().item() if n_min > 0 else float('nan')
+                loss_val = torch.log1p(torch.exp(-logit)).mean().item()
+                z_t = cfg.lr_gd * t
+
+                err_maj_resc = err_maj * (1 - eps) * z_t
+                err_min_resc = err_min * eps * z_t
+
+                logs["t"].append(t)
+                logs["err_maj"].append(err_maj)
+                logs["err_min"].append(err_min)
+                logs["err_maj_rescaled"].append(err_maj_resc)
+                logs["err_min_rescaled"].append(err_min_resc)
+                logs["loss"].append(loss_val)
+
+            if (t % print_every == 0) or t == 1:
+                print(f"    [GD t={t:>8d}]  loss={loss_val:.6f}  "
+                      f"err_maj={err_maj:.6f}  err_min={err_min:.6f}  "
+                      f"resc_maj={err_maj_resc:.4f}  resc_min={err_min_resc:.4f}")
+
+    return logs, w.cpu().numpy()
+
+
+def compute_theory_predictions(mu_A, mu_B, mu, gamma_min, epsilon):
+    """
+    Compute theoretical kappa prefactors (Theorem 2).
+
+    alpha = gamma_min * (1 + mu) / (1 + mu_A)
+
+    If alpha < 1:
+      kappa_maj = [gamma_min*(1+mu_B) - (1+mu)] / [gamma_min * Sigma]
+      kappa_min = [(1+mu_A) - gamma_min*(1+mu)] / [gamma_min^2 * Sigma]
+    If alpha >= 1:
+      kappa_maj = 1 / (1 + mu_A)
+      kappa_min = None  (minority decays as z_t^{-alpha})
+    """
+    alpha = gamma_min * (1 + mu) / (1 + mu_A)
+    Sigma = (1 + mu_A) * (1 + mu_B) - (1 + mu) ** 2
+
+    if alpha < 1.0:
+        km = (gamma_min * (1 + mu_B) - (1 + mu)) / (gamma_min * Sigma)
+        kn = ((1 + mu_A) - gamma_min * (1 + mu)) / (gamma_min ** 2 * Sigma)
+        return dict(alpha=alpha, Sigma=Sigma, kappa_maj=km, kappa_min=kn)
+    else:
+        km = 1.0 / (1 + mu_A)
+        return dict(alpha=alpha, Sigma=Sigma, kappa_maj=km, kappa_min=None)
+
+
+# ===========================================================
 #  Plots
 # ===========================================================
 
@@ -322,6 +428,88 @@ def make_plots(delta, iso_before, iso_after, cfg):
     print(f"  Figures saved to {fig_dir}")
 
 
+def make_gd_plots(gd_logs, theory, cfg):
+    """
+    Plot error decay curves from GD on representations vs theory.
+
+    Figure 1: log-log of err_maj, err_min vs z_t with theoretical envelopes.
+    Figure 2: rescaled errors eps_g * err_g * z_t vs z_t (should plateau to kappa_g).
+    """
+    fig_dir = Path(cfg.out_dir) / "figures"
+    fig_dir.mkdir(parents=True, exist_ok=True)
+
+    t_arr = np.array(gd_logs["t"])
+    z_arr = cfg.lr_gd * t_arr
+    err_maj = np.array(gd_logs["err_maj"])
+    err_min = np.array(gd_logs["err_min"])
+    resc_maj = np.array(gd_logs["err_maj_rescaled"])
+    resc_min = np.array(gd_logs["err_min_rescaled"])
+
+    eps = cfg.epsilon
+    alpha = theory["alpha"]
+    km = theory["kappa_maj"]
+    kn = theory.get("kappa_min")
+
+    # --- Figure 1: raw error decay (log-log) ---
+    fig, ax = plt.subplots(figsize=(9, 6))
+    ax.loglog(z_arr, err_maj, 'b-', alpha=0.7, linewidth=1.2, label='err maj (empirical)')
+    ax.loglog(z_arr, err_min, 'r-', alpha=0.7, linewidth=1.2, label='err min (empirical)')
+
+    # Theory: err_maj ~ kappa_maj / ((1-eps) * z_t)
+    z_theory = z_arr[z_arr > z_arr.max() * 0.01]  # skip early transient
+    theory_maj = km / ((1 - eps) * z_theory)
+    ax.loglog(z_theory, theory_maj, 'b--', linewidth=1.5,
+              label=f'theory maj: κ_maj/((1-ε)z_t),  κ={km:.4f}')
+
+    if alpha < 1.0 and kn is not None:
+        theory_min = kn / (eps * z_theory)
+        ax.loglog(z_theory, theory_min, 'r--', linewidth=1.5,
+                  label=f'theory min: κ_min/(εz_t),  κ={kn:.4f}')
+    else:
+        # alpha >= 1: minority decays as z_t^{-alpha} * (ln z_t)^{alpha-1}
+        log_z = np.log(z_theory)
+        theory_min = z_theory ** (-alpha) * log_z ** (alpha - 1) / eps
+        ax.loglog(z_theory, theory_min, 'r--', linewidth=1.5,
+                  label=f'theory min: z_t^{{-α}}(ln z_t)^{{α-1}}/ε,  α={alpha:.4f}')
+
+    ax.set_xlabel('$z_t = h \\cdot t$', fontsize=13)
+    ax.set_ylabel('Classification error', fontsize=13)
+    ax.set_title(f'Error decay — α = {alpha:.4f}', fontsize=14)
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(fig_dir / 'error_decay.png', dpi=200)
+    fig.savefig(fig_dir / 'error_decay.pdf', bbox_inches='tight')
+    plt.close(fig)
+
+    # --- Figure 2: rescaled errors (should plateau) ---
+    fig, ax = plt.subplots(figsize=(9, 6))
+    ax.semilogx(z_arr, resc_maj, 'b-', alpha=0.7, linewidth=1.2,
+                label='$(1-\\varepsilon) \\cdot \\mathrm{err_{maj}} \\cdot z_t$')
+    ax.semilogx(z_arr, resc_min, 'r-', alpha=0.7, linewidth=1.2,
+                label='$\\varepsilon \\cdot \\mathrm{err_{min}} \\cdot z_t$')
+
+    ax.axhline(km, color='blue', ls='--', alpha=0.8,
+               label=f'κ_maj = {km:.4f}')
+    if alpha < 1.0 and kn is not None:
+        ax.axhline(kn, color='red', ls='--', alpha=0.8,
+                   label=f'κ_min = {kn:.4f}')
+
+    ax.set_xlabel('$z_t = h \\cdot t$', fontsize=13)
+    ax.set_ylabel('Rescaled error  $\\varepsilon_g \\cdot \\mathrm{err}_g \\cdot z_t$',
+                  fontsize=13)
+    ax.set_title(f'Rescaled errors — α = {alpha:.4f}  '
+                 f'(should plateau to κ_g)', fontsize=14)
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(fig_dir / 'rescaled_errors.png', dpi=200)
+    fig.savefig(fig_dir / 'rescaled_errors.pdf', bbox_inches='tight')
+    plt.close(fig)
+
+    print(f"  GD figures saved to {fig_dir}")
+
+
 # ===========================================================
 #  Main
 # ===========================================================
@@ -339,7 +527,7 @@ def main():
     print("=" * 65)
 
     # ---- 1. synthetic data ----
-    print("\n[1/8] Generating synthetic isotropic-regime data ...")
+    print("\n[1/10] Generating synthetic isotropic-regime data ...")
     A_true, B_true, v_true = build_isotropic_operators(cfg)
     x, r_true, s_true, groups = generate_data(cfg, A_true, B_true, v_true)
     print(f"  d_r={cfg.d_r}, d_s={cfg.d_s}, N={cfg.N}, ε={cfg.epsilon}")
@@ -347,12 +535,12 @@ def main():
           f"(μ_A={cfg.mu_A}, μ_B={cfg.mu_B}, μ={cfg.mu}, γ̃_min={cfg.gamma_min})")
 
     # ---- 2. train MLP ----
-    print(f"\n[2/8] Training MLP ({cfg.n_layers} layers, "
+    print(f"\n[2/10] Training MLP (1 hidden layer, "
           f"{cfg.hidden_dim} hidden) ...")
     model = train_mlp(x, cfg)
 
     # ---- 3. extract representations ----
-    print("\n[3/8] Extracting penultimate-layer representations Φ(x) ...")
+    print("\n[3/10] Extracting penultimate-layer representations Φ(x) ...")
     X_t = torch.from_numpy(x).float().to(dev)
     with torch.no_grad():
         phi = model.get_features(X_t).cpu().numpy()
@@ -360,7 +548,7 @@ def main():
     print(f"  Φ(x) ∈ R^{d_phi}")
 
     # ---- 4. Δ_i partition ----
-    print("\n[4/8] Computing Δ_i partition ...")
+    print("\n[4/10] Computing Δ_i partition ...")
     delta, r_idx, s_idx, thr = delta_partition(phi, groups, cfg.delta_quantile)
     print(f"  Threshold = {thr:.6f}  (quantile {cfg.delta_quantile})")
     print(f"  r̃ dim = {len(r_idx)},  s̃ dim = {len(s_idx)}")
@@ -369,7 +557,7 @@ def main():
     phi_s = phi[:, s_idx]
 
     # ---- 5. fit Â, B̂ ----
-    print("\n[5/8] Fitting Â, B̂ by group-wise OLS ...")
+    print("\n[5/10] Fitting Â, B̂ by group-wise OLS ...")
     maj, minn = (groups == 0), (groups == 1)
 
     A_hat = np.linalg.lstsq(phi_r[maj], phi_s[maj], rcond=None)[0].T
@@ -386,7 +574,7 @@ def main():
     print(f"  R² minority: {r2_min:.6f}")
 
     # ---- 6. v̂ via QP ----
-    print("\n[6/8] Computing v̂ (max-margin on r̃) ...")
+    print("\n[6/10] Computing v̂ (max-margin on r̃) ...")
     v_hat, margins, qp_ok = compute_v_qp(phi_r)
     print(f"  QP converged: {qp_ok}")
 
@@ -397,7 +585,7 @@ def main():
     print(f"  γ̃_maj = {gm_maj:.4f},  γ̃_min = {gm_min:.4f}")
 
     # ---- 7. isotropic check (before projection) ----
-    print("\n[7/8] Isotropic condition — before projection ...")
+    print("\n[7/10] Isotropic condition — before projection ...")
     iso_bef = check_isotropic_general(A_hat, B_hat, v_hat)
     print(f"  μ_A = {iso_bef['mu_A']:.6f},  μ_B = {iso_bef['mu_B']:.6f}")
     print(f"  μ(A^TB) = {iso_bef['mu_AtB']:.6f},  μ(B^TA) = {iso_bef['mu_BtA']:.6f}")
@@ -406,7 +594,7 @@ def main():
     print(f"  Max residual: {iso_bef['max_residual']:.6f}")
 
     # ---- 8. projection + post-check ----
-    print("\n[8/8] Projecting onto isotropic constraint ...")
+    print("\n[8/10] Projecting onto isotropic constraint ...")
     A_proj, B_proj, pe_A, pe_B = isotropic_projection(A_hat, B_hat, v_hat)
     print(f"  Projection error  A: {pe_A:.6f},  B: {pe_B:.6f}")
 
@@ -432,16 +620,55 @@ def main():
     xi_nn = np.linalg.norm(xi_min, axis=1).mean()
     print(f"  Mean ‖ξ'‖  maj: {xi_nm:.6f},  min: {xi_nn:.6f}")
 
-    # ---- figures ----
+    # ---- figures (partition + isotropic) ----
     make_plots(delta, iso_bef, iso_aft, cfg)
+
+    # ---- 9. GD on learned representations ----
+    print(f"\n[9/10] Full-batch GD on representations "
+          f"(lr={cfg.lr_gd}, steps={cfg.steps_gd}) ...")
+    gd_logs, w_final = train_gd_on_representations(
+        phi_r, phi_s, groups, A_proj, B_proj, cfg)
+
+    final_err_maj = gd_logs["err_maj"][-1]
+    final_err_min = gd_logs["err_min"][-1]
+    print(f"  Final errors:  err_maj={final_err_maj:.8f}  "
+          f"err_min={final_err_min:.8f}")
+
+    # ---- 10. theory comparison ----
+    print("\n[10/10] Computing theory predictions ...")
+
+    # Use recovered isotropic parameters for theory
+    mu_B_r = iso_aft['mu_B']
+    theory = compute_theory_predictions(mu_A_r, mu_B_r, mu_r, tgm, cfg.epsilon)
+    print(f"  α = {theory['alpha']:.4f}  (true = {alpha_true:.4f})")
+    print(f"  Σ = {theory['Sigma']:.6f}")
+    print(f"  κ_maj = {theory['kappa_maj']:.6f}")
+    if theory['kappa_min'] is not None:
+        print(f"  κ_min = {theory['kappa_min']:.6f}")
+    else:
+        print(f"  κ_min = N/A  (α ≥ 1, minority decays as z_t^{{-α}})")
+
+    # Also compute theory from ground-truth params for comparison
+    theory_true = compute_theory_predictions(
+        cfg.mu_A, cfg.mu_B, cfg.mu, cfg.gamma_min, cfg.epsilon)
+    print(f"\n  Theory from ground truth:")
+    print(f"    κ_maj = {theory_true['kappa_maj']:.6f}")
+    if theory_true['kappa_min'] is not None:
+        print(f"    κ_min = {theory_true['kappa_min']:.6f}")
+    else:
+        print(f"    κ_min = N/A  (α ≥ 1)")
+
+    # ---- GD figures ----
+    make_gd_plots(gd_logs, theory, cfg)
 
     # ---- save ----
     results = dict(
         config=vars(cfg),
         ground_truth=dict(mu_A=cfg.mu_A, mu_B=cfg.mu_B, mu=cfg.mu,
                           gamma_min=cfg.gamma_min, alpha=alpha_true),
-        recovered=dict(mu_A=float(mu_A_r), mu=float(mu_r),
-                        gamma_min=float(tgm), alpha=float(alpha_rec)),
+        recovered=dict(mu_A=float(mu_A_r), mu_B=float(mu_B_r),
+                       mu=float(mu_r),
+                       gamma_min=float(tgm), alpha=float(alpha_rec)),
         partition=dict(n_r=len(r_idx), n_s=len(s_idx),
                        threshold=float(thr)),
         regression=dict(r2_maj=float(r2_maj), r2_min=float(r2_min)),
@@ -449,9 +676,17 @@ def main():
         isotropic_after=iso_aft,
         projection_error=dict(A=float(pe_A), B=float(pe_B)),
         residual_norm=dict(maj=float(xi_nm), min=float(xi_nn)),
+        theory_recovered=theory,
+        theory_true=theory_true,
+        gd_final=dict(err_maj=float(final_err_maj),
+                      err_min=float(final_err_min)),
     )
     with open(out / 'results.json', 'w') as f:
         json.dump(results, f, indent=2)
+
+    # Save full GD logs separately (large)
+    with open(out / 'gd_logs.json', 'w') as f:
+        json.dump(gd_logs, f)
 
     print(f"\n{'=' * 65}")
     print(f"  Done — all outputs in  {cfg.out_dir}")
