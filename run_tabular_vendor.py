@@ -36,11 +36,11 @@ Experiment design
 
 Usage
 -----
-  # Full run (default settings, ~30 min on GPU):
+  # Full run (default: 1M steps per alpha, ~1h on GPU):
   python run_tabular_vendor.py
 
   # Custom:
-  python run_tabular_vendor.py --steps 1000000 --N 100000 --out_dir ./tabular_results
+  python run_tabular_vendor.py --N 100000 --out_dir ./tabular_results
 
   # Quick sanity check (~5 min):
   python run_tabular_vendor.py --quick
@@ -79,20 +79,25 @@ def make_alpha_configs(alphas, epsilon, steps, N, noise_R, out_root):
     """
     configs = []
     for a in alphas:
-        cfg = SynthConfig()
-        cfg.mu_A = 1.0
-        cfg.mu_B = 1.0
-        cfg.mu = 0.0
-        cfg.gamma_min = 2.0 * a   # => alpha = gamma_min * 1 / 2 = a
-        cfg.gamma_maj = 1.0
-        cfg.epsilon = epsilon
-        cfg.noise_R = noise_R
-        cfg.N = N
-        cfg.steps = steps
-        cfg.lr = 0.01
-        cfg.log_every = max(1, steps // 2000)   # ~2000 log points
-        cfg.print_every = steps // 10
-        cfg.out_dir = os.path.join(out_root, f"alpha_{a:.2f}")
+        # Build config with correct parameters from the start so that
+        # __post_init__ computes alpha correctly.
+        cfg = SynthConfig(
+            mu_A=1.0,
+            mu_B=1.0,
+            mu=0.0,
+            gamma_min=2.0 * a,   # => alpha = gamma_min * 1 / 2 = a
+            gamma_maj=1.0,
+            epsilon=epsilon,
+            noise_R=noise_R,
+            N=N,
+            steps=steps,
+            lr=0.01,
+            log_every=max(1, steps // 2000),   # ~2000 log points
+            print_every=steps // 10,
+            out_dir=os.path.join(out_root, f"alpha_{a:.2f}"),
+        )
+        assert abs(cfg.alpha - a) < 1e-10, \
+            f"Alpha mismatch: expected {a}, got {cfg.alpha}"
         configs.append(cfg)
     return configs
 
@@ -124,8 +129,11 @@ def make_discriminating_plots(logs, cfg, theory, out_dir):
     z_t = cfg.lr * t
     alpha = cfg.alpha
 
-    # Filter out early transient and zero errors
-    mask = (err_maj > 1e-12) & (err_min > 1e-12) & (z_t > 1.0)
+    # Filter out early transient and numerically noisy tail
+    # Errors below ~1e-7 are dominated by floating-point noise in finite sums,
+    # making log-derivatives unreliable.
+    ERR_FLOOR = 1e-7
+    mask = (err_maj > ERR_FLOOR) & (err_min > ERR_FLOOR) & (z_t > 1.0)
     t, z_t, err_maj, err_min = t[mask], z_t[mask], err_maj[mask], err_min[mask]
 
     if len(t) < 100:
@@ -281,7 +289,7 @@ def make_summary_plot(all_results, out_dir):
         err_min = np.array(logs["err_min"])
         z_t = cfg.lr * t
 
-        mask = (err_maj > 1e-12) & (err_min > 1e-12) & (z_t > 1.0)
+        mask = (err_maj > 1e-7) & (err_min > 1e-7) & (z_t > 1.0)
         z_t, err_maj, err_min = z_t[mask], err_maj[mask], err_min[mask]
 
         if len(z_t) < 50:
@@ -379,7 +387,7 @@ def main():
     parser = argparse.ArgumentParser(description="Setup 1: Tabular + Vendor Scores")
     parser.add_argument("--out_dir", default="./tabular_vendor_results",
                         help="Output directory")
-    parser.add_argument("--steps", type=int, default=500_000,
+    parser.add_argument("--steps", type=int, default=1_000_000,
                         help="GD steps per configuration")
     parser.add_argument("--N", type=int, default=50_000,
                         help="Dataset size")
