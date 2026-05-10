@@ -12,12 +12,13 @@ Pipeline:
   2.  Train single-hidden-layer MLP on x = [r; s]
   3.  Extract penultimate-layer representations Φ(x)
   4.  Compute group-sensitivity Δ_i for each coordinate of Φ
-  5.  Partition Φ into r̃ (low Δ) and s̃ (high Δ)
+  5.  Validate partition against ground truth (cross-R² diagnostics)
   6.  Fit Â, B̂ by group-wise linear regression
   7.  Compute v̂ (max-margin direction on r̃)
-  8.  Check isotropic condition on (Â, B̂, v̂), project if needed
-  9.  Full-batch GD on x̃ = [r̃; s̃_proj] — track error decay
-  10. Compare empirical error decay with theoretical κ_g predictions
+  8.  Check isotropic condition on (Â, B̂, v̂)
+  9.  Isotropic projection (diagnostic only — measure how far off)
+  10. Full-batch GD on raw x̃ = [r̃; s̃] — track error decay
+  11. Compare empirical decay with theoretical κ_g (raw + ground truth)
 
 Usage:
     python scenario1_semisynthetic.py
@@ -205,6 +206,117 @@ def delta_partition(phi, groups, quantile):
 
 
 # ===========================================================
+#  Partition validation against ground truth
+# ===========================================================
+
+def validate_partition(phi_r, phi_s, r_true, s_true, groups):
+    """
+    Assess how well the Δ_i partition aligns with the ground-truth
+    causal/spurious split by computing cross-R² values.
+
+    For a good partition:
+      - ϕ_r should be mostly explained by r (high R²(ϕ_r ~ r))
+      - ϕ_s should be mostly explained by s (high R²(ϕ_s ~ s))
+      - Cross terms R²(ϕ_r ~ s) and R²(ϕ_s ~ r) indicate leakage
+
+    Note: since s = A*r + ξ, s is correlated with r by construction.
+    So R²(ϕ_s ~ r) can be high even with a correct partition.
+    The key diagnostic is the *incremental* R²: does s explain
+    variance in ϕ_s beyond what r already explains?
+
+    Returns: dict with all R² values and incremental contributions.
+    """
+    def _r2(Y, X):
+        """Multivariate R²: fraction of total variance in Y explained by X."""
+        # OLS: Y = X @ beta + residual
+        beta = np.linalg.lstsq(X, Y, rcond=None)[0]
+        Y_hat = X @ beta
+        ss_res = np.sum((Y - Y_hat) ** 2)
+        ss_tot = np.sum((Y - Y.mean(axis=0)) ** 2) + 1e-15
+        return 1.0 - ss_res / ss_tot
+
+    def _r2_incremental(Y, X_base, X_add):
+        """Incremental R² of X_add after controlling for X_base."""
+        r2_base = _r2(Y, X_base)
+        r2_full = _r2(Y, np.concatenate([X_base, X_add], axis=1))
+        return r2_full - r2_base
+
+    results = {}
+
+    # Basic cross-R² values
+    results['r2_phir_from_r'] = _r2(phi_r, r_true)
+    results['r2_phir_from_s'] = _r2(phi_r, s_true)
+    results['r2_phis_from_r'] = _r2(phi_s, r_true)
+    results['r2_phis_from_s'] = _r2(phi_s, s_true)
+
+    # Full model: ϕ ~ [r, s]
+    rs = np.concatenate([r_true, s_true], axis=1)
+    results['r2_phir_from_rs'] = _r2(phi_r, rs)
+    results['r2_phis_from_rs'] = _r2(phi_s, rs)
+
+    # Incremental R²: what does s add beyond r?
+    results['r2_phir_s_given_r'] = _r2_incremental(phi_r, r_true, s_true)
+    results['r2_phis_s_given_r'] = _r2_incremental(phi_s, r_true, s_true)
+
+    # Incremental R²: what does r add beyond s?
+    results['r2_phir_r_given_s'] = _r2_incremental(phi_r, s_true, r_true)
+    results['r2_phis_r_given_s'] = _r2_incremental(phi_s, s_true, r_true)
+
+    # Per-group R² (to check if the linear relationship holds within groups)
+    maj = (groups == 0)
+    minn = (groups == 1)
+    results['r2_phis_from_r_maj'] = _r2(phi_s[maj], r_true[maj])
+    results['r2_phis_from_r_min'] = _r2(phi_s[minn], r_true[minn])
+    results['r2_phis_from_s_maj'] = _r2(phi_s[maj], s_true[maj])
+    results['r2_phis_from_s_min'] = _r2(phi_s[minn], s_true[minn])
+
+    return results
+
+
+def make_partition_plot(val_results, cfg):
+    """Bar chart of cross-R² values for partition validation."""
+    fig_dir = Path(cfg.out_dir) / "figures"
+    fig_dir.mkdir(parents=True, exist_ok=True)
+
+    labels = ['$\\tilde{r}$ from $r$', '$\\tilde{r}$ from $s$',
+              '$\\tilde{s}$ from $r$', '$\\tilde{s}$ from $s$']
+    vals = [val_results['r2_phir_from_r'], val_results['r2_phir_from_s'],
+            val_results['r2_phis_from_r'], val_results['r2_phis_from_s']]
+
+    labels_inc = ['$\\tilde{r}$: $s|r$', '$\\tilde{r}$: $r|s$',
+                  '$\\tilde{s}$: $s|r$', '$\\tilde{s}$: $r|s$']
+    vals_inc = [val_results['r2_phir_s_given_r'], val_results['r2_phir_r_given_s'],
+                val_results['r2_phis_s_given_r'], val_results['r2_phis_r_given_s']]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    colors = ['steelblue', 'steelblue', 'salmon', 'salmon']
+    ax1.bar(range(len(labels)), vals, color=colors, alpha=0.8)
+    ax1.set_xticks(range(len(labels)))
+    ax1.set_xticklabels(labels, fontsize=11)
+    ax1.set_ylabel('$R^2$', fontsize=12)
+    ax1.set_title('Partition validation: direct $R^2$', fontsize=13)
+    ax1.set_ylim(0, 1.05)
+    for i, v in enumerate(vals):
+        ax1.text(i, v + 0.02, f'{v:.3f}', ha='center', fontsize=10)
+
+    ax2.bar(range(len(labels_inc)), vals_inc, color=colors, alpha=0.8)
+    ax2.set_xticks(range(len(labels_inc)))
+    ax2.set_xticklabels(labels_inc, fontsize=11)
+    ax2.set_ylabel('Incremental $R^2$', fontsize=12)
+    ax2.set_title('Partition validation: incremental $R^2$\n'
+                  '(what does the second predictor add?)', fontsize=13)
+    for i, v in enumerate(vals_inc):
+        ax2.text(i, v + 0.005, f'{v:.4f}', ha='center', fontsize=10)
+
+    fig.tight_layout()
+    fig.savefig(fig_dir / 'partition_validation.png', dpi=200)
+    fig.savefig(fig_dir / 'partition_validation.pdf', bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Partition validation figure saved to {fig_dir}")
+
+
+# ===========================================================
 #  Isotropic check + projection  (general, non-circulant)
 # ===========================================================
 
@@ -286,29 +398,24 @@ def compute_v_qp(phi_r):
 #  Full-batch GD on learned representations
 # ===========================================================
 
-def train_gd_on_representations(phi_r, phi_s, groups, A_op, B_op, cfg):
+def train_gd_on_representations(phi_r, phi_s, groups, cfg):
     """
     Full-batch GD with logistic loss on x̃ = [ϕ_r; ϕ_s].
     Label-absorbed: y = +1 for all samples, loss = log(1 + exp(-w^T x̃)).
 
-    Uses A_op, B_op (the isotropic-projected operators) to reconstruct
-    s̃_proj = A_op r̃  (majority) or B_op r̃  (minority), then trains on
-    x̃ = [r̃; s̃_proj].  This ensures the GD dynamics see data that
-    (approximately) satisfies the isotropic regime.
+    Trains directly on the raw learned representations (no projection/
+    reconstruction).  This tests whether the theorem's predictions hold
+    approximately even when the isotropic condition is not exact.
 
     Returns: logs dict with trajectories, final weight vector.
     """
     dev = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    # Reconstruct s from projected operators so isotropic condition holds
     N = phi_r.shape[0]
     maj = (groups == 0)
     minn = (groups == 1)
-    s_proj = np.zeros_like(phi_s)
-    s_proj[maj]  = phi_r[maj]  @ A_op.T
-    s_proj[minn] = phi_r[minn] @ B_op.T
 
-    x_tilde = np.concatenate([phi_r, s_proj], axis=1)
+    x_tilde = np.concatenate([phi_r, phi_s], axis=1)
     X = torch.from_numpy(x_tilde).float().to(dev)
     n_maj = maj.sum()
     n_min = minn.sum()
@@ -428,12 +535,14 @@ def make_plots(delta, iso_before, iso_after, cfg):
     print(f"  Figures saved to {fig_dir}")
 
 
-def make_gd_plots(gd_logs, theory, cfg):
+def make_gd_plots(gd_logs, theory, cfg, suffix=''):
     """
     Plot error decay curves from GD on representations vs theory.
 
     Figure 1: log-log of err_maj, err_min vs z_t with theoretical envelopes.
     Figure 2: rescaled errors eps_g * err_g * z_t vs z_t (should plateau to kappa_g).
+
+    suffix: appended to filenames (e.g. '_true' for ground-truth theory).
     """
     fig_dir = Path(cfg.out_dir) / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
@@ -478,8 +587,8 @@ def make_gd_plots(gd_logs, theory, cfg):
     ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(fig_dir / 'error_decay.png', dpi=200)
-    fig.savefig(fig_dir / 'error_decay.pdf', bbox_inches='tight')
+    fig.savefig(fig_dir / f'error_decay{suffix}.png', dpi=200)
+    fig.savefig(fig_dir / f'error_decay{suffix}.pdf', bbox_inches='tight')
     plt.close(fig)
 
     # --- Figure 2: rescaled errors (should plateau) ---
@@ -503,11 +612,12 @@ def make_gd_plots(gd_logs, theory, cfg):
     ax.legend(fontsize=10)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(fig_dir / 'rescaled_errors.png', dpi=200)
-    fig.savefig(fig_dir / 'rescaled_errors.pdf', bbox_inches='tight')
+    fig.savefig(fig_dir / f'rescaled_errors{suffix}.png', dpi=200)
+    fig.savefig(fig_dir / f'rescaled_errors{suffix}.pdf', bbox_inches='tight')
     plt.close(fig)
 
-    print(f"  GD figures saved to {fig_dir}")
+    label = " (ground truth)" if suffix else " (raw)"
+    print(f"  GD figures{label} saved to {fig_dir}")
 
 
 # ===========================================================
@@ -527,7 +637,7 @@ def main():
     print("=" * 65)
 
     # ---- 1. synthetic data ----
-    print("\n[1/10] Generating synthetic isotropic-regime data ...")
+    print("\n[1/11] Generating synthetic isotropic-regime data ...")
     A_true, B_true, v_true = build_isotropic_operators(cfg)
     x, r_true, s_true, groups = generate_data(cfg, A_true, B_true, v_true)
     print(f"  d_r={cfg.d_r}, d_s={cfg.d_s}, N={cfg.N}, ε={cfg.epsilon}")
@@ -535,12 +645,12 @@ def main():
           f"(μ_A={cfg.mu_A}, μ_B={cfg.mu_B}, μ={cfg.mu}, γ̃_min={cfg.gamma_min})")
 
     # ---- 2. train MLP ----
-    print(f"\n[2/10] Training MLP (1 hidden layer, "
+    print(f"\n[2/11] Training MLP (1 hidden layer, "
           f"{cfg.hidden_dim} hidden) ...")
     model = train_mlp(x, cfg)
 
     # ---- 3. extract representations ----
-    print("\n[3/10] Extracting penultimate-layer representations Φ(x) ...")
+    print("\n[3/11] Extracting penultimate-layer representations Φ(x) ...")
     X_t = torch.from_numpy(x).float().to(dev)
     with torch.no_grad():
         phi = model.get_features(X_t).cpu().numpy()
@@ -548,7 +658,7 @@ def main():
     print(f"  Φ(x) ∈ R^{d_phi}")
 
     # ---- 4. Δ_i partition ----
-    print("\n[4/10] Computing Δ_i partition ...")
+    print("\n[4/11] Computing Δ_i partition ...")
     delta, r_idx, s_idx, thr = delta_partition(phi, groups, cfg.delta_quantile)
     print(f"  Threshold = {thr:.6f}  (quantile {cfg.delta_quantile})")
     print(f"  r̃ dim = {len(r_idx)},  s̃ dim = {len(s_idx)}")
@@ -556,8 +666,23 @@ def main():
     phi_r = phi[:, r_idx]
     phi_s = phi[:, s_idx]
 
-    # ---- 5. fit Â, B̂ ----
-    print("\n[5/10] Fitting Â, B̂ by group-wise OLS ...")
+    # ---- 5. partition validation ----
+    print("\n[5/11] Validating partition against ground truth ...")
+    val = validate_partition(phi_r, phi_s, r_true, s_true, groups)
+    print(f"  R²(ϕ_r ~ r) = {val['r2_phir_from_r']:.4f}   "
+          f"R²(ϕ_r ~ s) = {val['r2_phir_from_s']:.4f}")
+    print(f"  R²(ϕ_s ~ r) = {val['r2_phis_from_r']:.4f}   "
+          f"R²(ϕ_s ~ s) = {val['r2_phis_from_s']:.4f}")
+    print(f"  Incremental R² (s given r):")
+    print(f"    ϕ_r: {val['r2_phir_s_given_r']:.6f}   "
+          f"ϕ_s: {val['r2_phis_s_given_r']:.6f}")
+    print(f"  Incremental R² (r given s):")
+    print(f"    ϕ_r: {val['r2_phir_r_given_s']:.6f}   "
+          f"ϕ_s: {val['r2_phis_r_given_s']:.6f}")
+    make_partition_plot(val, cfg)
+
+    # ---- 6. fit Â, B̂ ----
+    print("\n[6/11] Fitting Â, B̂ by group-wise OLS ...")
     maj, minn = (groups == 0), (groups == 1)
 
     A_hat = np.linalg.lstsq(phi_r[maj], phi_s[maj], rcond=None)[0].T
@@ -573,8 +698,8 @@ def main():
     print(f"  R² majority: {r2_maj:.6f}")
     print(f"  R² minority: {r2_min:.6f}")
 
-    # ---- 6. v̂ via QP ----
-    print("\n[6/10] Computing v̂ (max-margin on r̃) ...")
+    # ---- 7. v̂ via QP ----
+    print("\n[7/11] Computing v̂ (max-margin on r̃) ...")
     v_hat, margins, qp_ok = compute_v_qp(phi_r)
     print(f"  QP converged: {qp_ok}")
 
@@ -584,8 +709,8 @@ def main():
     gm_maj /= sc; gm_min /= sc
     print(f"  γ̃_maj = {gm_maj:.4f},  γ̃_min = {gm_min:.4f}")
 
-    # ---- 7. isotropic check (before projection) ----
-    print("\n[7/10] Isotropic condition — before projection ...")
+    # ---- 8. isotropic check ----
+    print("\n[8/11] Isotropic condition check ...")
     iso_bef = check_isotropic_general(A_hat, B_hat, v_hat)
     print(f"  μ_A = {iso_bef['mu_A']:.6f},  μ_B = {iso_bef['mu_B']:.6f}")
     print(f"  μ(A^TB) = {iso_bef['mu_AtB']:.6f},  μ(B^TA) = {iso_bef['mu_BtA']:.6f}")
@@ -593,8 +718,8 @@ def main():
           f"AtB={iso_bef['res_AtB']:.4f}  BtA={iso_bef['res_BtA']:.4f}")
     print(f"  Max residual: {iso_bef['max_residual']:.6f}")
 
-    # ---- 8. projection + post-check ----
-    print("\n[8/10] Projecting onto isotropic constraint ...")
+    # ---- 9. projection (diagnostic only) ----
+    print("\n[9/11] Projecting onto isotropic constraint (diagnostic) ...")
     A_proj, B_proj, pe_A, pe_B = isotropic_projection(A_hat, B_hat, v_hat)
     print(f"  Projection error  A: {pe_A:.6f},  B: {pe_B:.6f}")
 
@@ -623,60 +748,73 @@ def main():
     # ---- figures (partition + isotropic) ----
     make_plots(delta, iso_bef, iso_aft, cfg)
 
-    # ---- 9. GD on learned representations ----
-    print(f"\n[9/10] Full-batch GD on representations "
+    # ---- 10. GD on raw representations ----
+    print(f"\n[10/11] Full-batch GD on raw representations "
           f"(lr={cfg.lr_gd}, steps={cfg.steps_gd}) ...")
     gd_logs, w_final = train_gd_on_representations(
-        phi_r, phi_s, groups, A_proj, B_proj, cfg)
+        phi_r, phi_s, groups, cfg)
 
     final_err_maj = gd_logs["err_maj"][-1]
     final_err_min = gd_logs["err_min"][-1]
     print(f"  Final errors:  err_maj={final_err_maj:.8f}  "
           f"err_min={final_err_min:.8f}")
 
-    # ---- 10. theory comparison ----
-    print("\n[10/10] Computing theory predictions ...")
+    # ---- 11. theory comparison ----
+    print("\n[11/11] Computing theory predictions ...")
 
-    # Use recovered isotropic parameters for theory
-    mu_B_r = iso_aft['mu_B']
-    theory = compute_theory_predictions(mu_A_r, mu_B_r, mu_r, tgm, cfg.epsilon)
-    print(f"  α = {theory['alpha']:.4f}  (true = {alpha_true:.4f})")
-    print(f"  Σ = {theory['Sigma']:.6f}")
-    print(f"  κ_maj = {theory['kappa_maj']:.6f}")
+    # Use unprojected (raw) eigenvalues from Â, B̂ for theory
+    mu_A_raw = iso_bef['mu_A']
+    mu_B_raw = iso_bef['mu_B']
+    mu_raw   = iso_bef['mu_AtB']
+    theory = compute_theory_predictions(mu_A_raw, mu_B_raw, mu_raw, tgm, cfg.epsilon)
+    print(f"  From raw Â, B̂ eigenvalues:")
+    print(f"    μ_A = {mu_A_raw:.4f},  μ_B = {mu_B_raw:.4f},  μ = {mu_raw:.4f}")
+    print(f"    α = {theory['alpha']:.4f}  (true = {alpha_true:.4f})")
+    print(f"    Σ = {theory['Sigma']:.6f}")
+    print(f"    κ_maj = {theory['kappa_maj']:.6f}")
     if theory['kappa_min'] is not None:
-        print(f"  κ_min = {theory['kappa_min']:.6f}")
+        print(f"    κ_min = {theory['kappa_min']:.6f}")
     else:
-        print(f"  κ_min = N/A  (α ≥ 1, minority decays as z_t^{{-α}})")
+        print(f"    κ_min = N/A  (α ≥ 1, minority decays as z_t^{{-α}})")
 
     # Also compute theory from ground-truth params for comparison
     theory_true = compute_theory_predictions(
         cfg.mu_A, cfg.mu_B, cfg.mu, cfg.gamma_min, cfg.epsilon)
     print(f"\n  Theory from ground truth:")
+    print(f"    α = {theory_true['alpha']:.4f}")
     print(f"    κ_maj = {theory_true['kappa_maj']:.6f}")
     if theory_true['kappa_min'] is not None:
         print(f"    κ_min = {theory_true['kappa_min']:.6f}")
     else:
         print(f"    κ_min = N/A  (α ≥ 1)")
 
-    # ---- GD figures ----
+    # ---- GD figures (plot both raw-theory and ground-truth-theory) ----
     make_gd_plots(gd_logs, theory, cfg)
+    make_gd_plots(gd_logs, theory_true, cfg, suffix='_true')
 
     # ---- save ----
+    # Recovered alpha from raw eigenvalues (no projection)
+    alpha_raw = theory['alpha']
+
     results = dict(
         config=vars(cfg),
         ground_truth=dict(mu_A=cfg.mu_A, mu_B=cfg.mu_B, mu=cfg.mu,
                           gamma_min=cfg.gamma_min, alpha=alpha_true),
-        recovered=dict(mu_A=float(mu_A_r), mu_B=float(mu_B_r),
-                       mu=float(mu_r),
-                       gamma_min=float(tgm), alpha=float(alpha_rec)),
+        recovered_raw=dict(mu_A=float(mu_A_raw), mu_B=float(mu_B_raw),
+                           mu=float(mu_raw),
+                           gamma_min=float(tgm), alpha=float(alpha_raw)),
+        recovered_proj=dict(mu_A=float(mu_A_r), mu_B=float(iso_aft['mu_B']),
+                            mu=float(mu_r),
+                            gamma_min=float(tgm), alpha=float(alpha_rec)),
         partition=dict(n_r=len(r_idx), n_s=len(s_idx),
                        threshold=float(thr)),
+        partition_validation=val,
         regression=dict(r2_maj=float(r2_maj), r2_min=float(r2_min)),
         isotropic_before=iso_bef,
         isotropic_after=iso_aft,
         projection_error=dict(A=float(pe_A), B=float(pe_B)),
         residual_norm=dict(maj=float(xi_nm), min=float(xi_nn)),
-        theory_recovered=theory,
+        theory_raw=theory,
         theory_true=theory_true,
         gd_final=dict(err_maj=float(final_err_maj),
                       err_min=float(final_err_min)),
