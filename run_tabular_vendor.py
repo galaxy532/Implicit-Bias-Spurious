@@ -36,7 +36,7 @@ Experiment design
 
 Usage
 -----
-  # Full run (default: 20M steps per alpha, ~20h on GPU):
+  # Full run (default: 10M steps, N=5M, ~several hours on GPU):
   python run_tabular_vendor.py
 
   # Custom:
@@ -44,6 +44,10 @@ Usage
 
   # Quick sanity check (~5 min):
   python run_tabular_vendor.py --quick
+
+  # Re-plot only (no GD re-run), optionally cropping x-axis:
+  python run_tabular_vendor.py --plot_only
+  python run_tabular_vendor.py --plot_only --z_max 20000
 """
 
 import argparse
@@ -59,7 +63,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 
 from synth_utils import (
     SynthConfig, build_isotropic_operators, generate_dataset,
-    train_population_gd, kappa_theory, save_logs, ensure_dir,
+    train_population_gd, kappa_theory, save_logs, load_logs, ensure_dir,
 )
 
 
@@ -114,7 +118,7 @@ def smooth(arr, window=51):
     return np.convolve(arr, kernel, mode="valid")
 
 
-def make_discriminating_plots(logs, cfg, theory, out_dir):
+def make_discriminating_plots(logs, cfg, theory, out_dir, z_max=None):
     """
     Produce 3 plots per alpha value, tailored to the regime:
 
@@ -128,6 +132,9 @@ def make_discriminating_plots(logs, cfg, theory, out_dir):
            alpha > 1:  two panels: err*z_t + minority-only err_min*z_t^alpha
 
       3. Rescaled errors:  eps_g * err_g * z_t  (shows kappa_g prefactors)
+
+    If z_max is given, crop all plots at z_t <= z_max (to remove
+    the finite-sample floor region where errors can't decrease further).
     """
     ensure_dir(out_dir)
     t = np.array(logs["t"], dtype=np.float64)
@@ -141,6 +148,8 @@ def make_discriminating_plots(logs, cfg, theory, out_dir):
     # making log-derivatives unreliable.
     ERR_FLOOR = 1e-7
     mask = (err_maj > ERR_FLOOR) & (err_min > ERR_FLOOR) & (z_t > 1.0)
+    if z_max is not None:
+        mask &= (z_t <= z_max)
     t, z_t, err_maj, err_min = t[mask], z_t[mask], err_maj[mask], err_min[mask]
 
     if len(t) < 100:
@@ -267,7 +276,7 @@ def make_discriminating_plots(logs, cfg, theory, out_dir):
     plt.close(fig)
 
 
-def make_summary_plot(all_results, out_dir):
+def make_summary_plot(all_results, out_dir, z_max=None):
     """
     Summary plot: measured minority decay exponent vs. theoretical alpha.
     Measures the exponent from the last 20% of the local slope curve.
@@ -286,6 +295,8 @@ def make_summary_plot(all_results, out_dir):
         z_t = cfg.lr * t
 
         mask = (err_maj > 1e-7) & (err_min > 1e-7) & (z_t > 1.0)
+        if z_max is not None:
+            mask &= (z_t <= z_max)
         z_t, err_maj, err_min = z_t[mask], err_maj[mask], err_min[mask]
 
         if len(z_t) < 50:
@@ -383,9 +394,9 @@ def main():
     parser = argparse.ArgumentParser(description="Setup 1: Tabular + Vendor Scores")
     parser.add_argument("--out_dir", default="./tabular_vendor_results",
                         help="Output directory")
-    parser.add_argument("--steps", type=int, default=20_000_000,
+    parser.add_argument("--steps", type=int, default=10_000_000,
                         help="GD steps per configuration")
-    parser.add_argument("--N", type=int, default=50_000,
+    parser.add_argument("--N", type=int, default=5_000_000,
                         help="Dataset size")
     parser.add_argument("--epsilon", type=float, default=0.1,
                         help="Minority fraction")
@@ -396,6 +407,10 @@ def main():
                         help="Alpha values to sweep")
     parser.add_argument("--quick", action="store_true",
                         help="Quick sanity check (fewer steps, fewer alphas)")
+    parser.add_argument("--plot_only", action="store_true",
+                        help="Re-generate plots from saved logs.json without re-running GD")
+    parser.add_argument("--z_max", type=float, default=None,
+                        help="Crop x-axis at this z_t value (useful to remove floor region)")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -409,9 +424,47 @@ def main():
     print("=" * 60)
     print(f"  Output: {args.out_dir}")
     print(f"  Alphas: {args.alphas}")
-    print(f"  Steps: {args.steps}, N: {args.N}, eps: {args.epsilon}")
-    print(f"  Noise: {args.noise_R}, Seed: {args.seed}")
+    if args.plot_only:
+        print(f"  Mode: PLOT ONLY (re-generating plots from saved logs)")
+    else:
+        print(f"  Steps: {args.steps}, N: {args.N}, eps: {args.epsilon}")
+        print(f"  Noise: {args.noise_R}, Seed: {args.seed}")
+    if args.z_max is not None:
+        print(f"  z_max crop: {args.z_max:.0f}")
 
+    # ---- Plot-only mode: reload from saved logs.json ----
+    if args.plot_only:
+        all_results = []
+        for a in args.alphas:
+            run_dir = os.path.join(args.out_dir, f"alpha_{a:.2f}")
+            logs_path = os.path.join(run_dir, "logs.json")
+            if not os.path.exists(logs_path):
+                print(f"  [SKIP] No logs.json found for alpha={a:.2f} in {run_dir}")
+                continue
+            payload = load_logs(run_dir)
+            logs = payload["logs"]
+            cfg_dict = payload["config"]
+            # Reconstruct SynthConfig
+            cfg = SynthConfig(
+                mu_A=cfg_dict["mu_A"], mu_B=cfg_dict["mu_B"], mu=cfg_dict["mu"],
+                gamma_min=cfg_dict["gamma_min"], gamma_maj=cfg_dict["gamma_maj"],
+                epsilon=cfg_dict["epsilon"], noise_R=cfg_dict.get("noise_R", 0.1),
+                N=cfg_dict["N"], steps=cfg_dict["steps"], lr=cfg_dict["lr"],
+                log_every=cfg_dict.get("log_every", 1),
+                print_every=cfg_dict.get("print_every", 1),
+                out_dir=run_dir,
+            )
+            theory = kappa_theory(cfg)
+            all_results.append({"cfg": cfg, "logs": logs, "theory": theory})
+            make_discriminating_plots(logs, cfg, theory, run_dir, z_max=args.z_max)
+            print(f"  Plots regenerated for alpha={a:.2f} in {run_dir}/")
+
+        if all_results:
+            make_summary_plot(all_results, args.out_dir, z_max=args.z_max)
+        print("\nDone (plot-only mode).")
+        return
+
+    # ---- Normal mode: run GD then plot ----
     configs = make_alpha_configs(
         alphas=args.alphas,
         epsilon=args.epsilon,
@@ -430,11 +483,11 @@ def main():
         all_results.append({"cfg": cfg, "logs": logs, "theory": theory})
 
         # Produce per-alpha plots
-        make_discriminating_plots(logs, cfg, theory, cfg.out_dir)
+        make_discriminating_plots(logs, cfg, theory, cfg.out_dir, z_max=args.z_max)
         print(f"  Plots saved to {cfg.out_dir}/")
 
     # Summary plot
-    make_summary_plot(all_results, args.out_dir)
+    make_summary_plot(all_results, args.out_dir, z_max=args.z_max)
 
     # Save summary JSON
     summary = {}
