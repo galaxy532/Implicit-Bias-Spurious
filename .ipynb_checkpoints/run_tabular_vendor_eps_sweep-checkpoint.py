@@ -202,12 +202,14 @@ def make_eps_sweep_plots(results_by_eps, alpha, theory_by_eps, out_dir,
         ax.set_title(
             f"Rescaled minority ($\\alpha = {alpha:.2f} < 1$): "
             f"all $\\varepsilon$ collapse onto $\\kappa_{{\\min}}$")
+        ax.set_ylim([0, 0.6])
     else:
         ax.set_title(
             f"Rescaled minority ($\\alpha = {alpha:.2f} \\geq 1$): "
             f"all $\\to 0$ ($\\varepsilon$-independent rate)")
+        ax.set_ylim([0, 0.075])
+    
     # Fixed y-axis for visual consistency
-    ax.set_ylim([0, 0.6])
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
@@ -235,7 +237,7 @@ def make_eps_sweep_plots(results_by_eps, alpha, theory_by_eps, out_dir,
     ax.set_title(
         f"Rescaled majority ($\\alpha = {alpha:.2f}$): "
         f"all $\\varepsilon$ collapse onto $\\kappa_{{\\mathrm{{maj}}}}$")
-    ax.set_ylim([0, 0.6])
+    ax.set_ylim([0, 1.4])
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
