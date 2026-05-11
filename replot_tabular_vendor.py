@@ -243,6 +243,95 @@ def plot_rescaled(d, cfg, theory, out_dir):
 
 
 # ============================================================
+#  Alpha-sweep overlay (the main paper figure)
+# ============================================================
+
+# Colour palette for the alpha sweep (colourblind-friendly)
+ALPHA_COLORS = {
+    0.5:  "#d62728",   # red
+    0.7:  "#ff7f0e",   # orange
+    1.0:  "#2ca02c",   # green
+    1.3:  "#1f77b4",   # blue
+    1.5:  "#9467bd",   # purple
+    2.0:  "#8c564b",   # brown
+}
+
+def _alpha_color(a):
+    return ALPHA_COLORS.get(a, "black")
+
+
+def plot_alpha_sweep_overlay(all_results, out_dir):
+    """
+    Two-panel overlay of all alpha values on the same axes.
+
+    Panel 1 (left):  z_t * err_maj  for each alpha
+        Majority always decays as 1/z_t, so all curves plateau at
+        kappa_maj(alpha) / (1-eps).  Shows universal 1/z_t structure.
+
+    Panel 2 (right): z_t^{max(1,alpha)} * err_min  for each alpha
+        Each curve is compensated by its own correct exponent, so they
+        all approximately plateau (up to the log correction for alpha >= 1).
+        This is the most direct proof that the exponent is correct across
+        the entire sweep.
+    """
+    ensure_dir(out_dir)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+
+    for res in all_results:
+        cfg = res["cfg"]
+        d = res["data"]
+        theory = res["theory"]
+        z_t = d["z_t"]
+        err_maj = d["err_maj"]
+        err_min = d["err_min"]
+        alpha = cfg.alpha
+        eps = cfg.epsilon
+        col = _alpha_color(alpha)
+
+        # ---- Left panel: z_t * err_maj ----
+        comp_maj = err_maj * z_t
+        axes[0].plot(z_t, comp_maj, color=col, lw=1.5,
+                     label=f"$\\alpha = {alpha:.1f}$")
+
+        # ---- Right panel: z_t^{max(1,alpha)} * err_min ----
+        exponent = max(1.0, alpha)
+        comp_min = err_min * z_t**exponent
+        axes[1].plot(z_t, comp_min, color=col, lw=1.5,
+                     label=f"$\\alpha = {alpha:.1f}$")
+
+    # Left panel formatting
+    axes[0].set_xscale("log")
+    axes[0].set_xlabel(r"$z_t = h \cdot t$")
+    axes[0].set_ylabel(r"$z_t \cdot \mathrm{err}_{\mathrm{maj}}$")
+    axes[0].set_title(r"Majority: compensated by $z_t$"
+                      "\n"
+                      r"(plateau $\Leftrightarrow$ $1/z_t$ decay)")
+    axes[0].set_ylim([0, 1.2])
+    axes[0].legend(fontsize=9, loc="upper left")
+    axes[0].grid(True, alpha=0.3)
+
+    # Right panel formatting
+    axes[1].set_xscale("log")
+    axes[1].set_xlabel(r"$z_t = h \cdot t$")
+    axes[1].set_ylabel(
+        r"$z_t^{\max(1,\alpha)} \cdot \mathrm{err}_{\min}$")
+    axes[1].set_title(r"Minority: compensated by $z_t^{\max(1,\alpha)}$"
+                      "\n"
+                      r"(plateau $\Leftrightarrow$ correct exponent)")
+    axes[1].legend(fontsize=9, loc="upper left")
+    axes[1].grid(True, alpha=0.3)
+
+    fig.suptitle(r"$\alpha$-sweep overlay ($\varepsilon = 0.1$, "
+                 r"$N = 5 \times 10^6$)", fontsize=13)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, "alpha_sweep_overlay.png"), dpi=150)
+    fig.savefig(os.path.join(out_dir, "alpha_sweep_overlay.pdf"))
+    plt.close(fig)
+    print(f"  Alpha-sweep overlay saved to {out_dir}/alpha_sweep_overlay.png")
+
+
+# ============================================================
 #  Summary plot
 # ============================================================
 
@@ -381,7 +470,11 @@ def main():
 
         all_results.append({"cfg": cfg, "data": d, "theory": theory})
 
-    # Summary plot
+    # Alpha-sweep overlay (main paper figure)
+    if all_results:
+        plot_alpha_sweep_overlay(all_results, args.out_dir)
+
+    # Summary plot (phase transition)
     if all_results:
         plot_summary(all_results, args.out_dir, args.T_max)
 
