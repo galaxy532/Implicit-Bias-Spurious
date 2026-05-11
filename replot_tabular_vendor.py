@@ -319,11 +319,12 @@ def plot_alpha_sweep_overlay(all_results, out_dir):
     axes[1].set_title(r"Minority: compensated by $z_t^{\max(1,\alpha)}$"
                       "\n"
                       r"(plateau $\Leftrightarrow$ correct exponent)")
+    axes[1].set_ylim([0, 10])
     axes[1].legend(fontsize=9, loc="upper left")
     axes[1].grid(True, alpha=0.3)
 
     fig.suptitle(r"$\alpha$-sweep overlay ($\varepsilon = 0.1$, "
-                 r"$N = 5 \times 10^6$)", fontsize=13)
+                 r"$N = 10^6$)", fontsize=13)
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir, "alpha_sweep_overlay.png"), dpi=150)
     fig.savefig(os.path.join(out_dir, "alpha_sweep_overlay.pdf"))

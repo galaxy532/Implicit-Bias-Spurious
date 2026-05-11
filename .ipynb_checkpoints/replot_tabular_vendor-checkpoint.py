@@ -87,6 +87,9 @@ def plot_error_ratio(d, cfg, theory, out_dir):
             ax.axhline(expected, color="green", ls="--", lw=1.5,
                        label=f"Theory: {expected:.2f}")
             ax.legend()
+        # y-axis: from 0 to 30% above the theory line (or data max)
+        y_top = max(ratio.max(), expected if theory.get("kappa_min") else ratio.max()) * 1.3
+        ax.set_ylim([0, y_top])
         ax.set_title(f"Error ratio ($\\alpha = {alpha:.2f} < 1$: should converge)")
     else:
         ax.set_yscale("log")
@@ -122,11 +125,16 @@ def plot_compensated(d, cfg, theory, out_dir):
         axes[0].set_ylabel(r"$\mathrm{err} \cdot z_t$")
         axes[0].set_title("Compensated by $z_t$\n(plateau $\\Leftrightarrow$ $1/z_t$ decay)")
         axes[0].set_xscale("log")
+        # Zoom out: y from 0 to 2x the theory line
+        y_top_left = (theory["kappa_maj"] / (1 - cfg.epsilon)) * 2.0 if theory.get("kappa_maj") else None
+        if y_top_left:
+            axes[0].set_ylim([0, y_top_left])
         axes[0].legend(fontsize=8)
         axes[0].grid(True, alpha=0.3)
 
         # Right: err_min * z_t^alpha only
-        axes[1].plot(z_t, err_min * z_t**alpha, "r-", lw=1.5,
+        comp_min_alpha = err_min * z_t**alpha
+        axes[1].plot(z_t, comp_min_alpha, "r-", lw=1.5,
                      label=f"Minority $\\cdot\\, z_t^{{{alpha:.2f}}}$")
         axes[1].set_xlabel(r"$z_t$")
         axes[1].set_ylabel(
@@ -135,6 +143,8 @@ def plot_compensated(d, cfg, theory, out_dir):
             f"Minority compensated by $z_t^{{\\alpha}}$\n"
             f"(plateau $\\Leftrightarrow$ $z_t^{{-\\alpha}}$ decay)")
         axes[1].set_xscale("log")
+        # Zoom out: 0 to 2x the data max
+        axes[1].set_ylim([0, comp_min_alpha.max() * 2.0])
         axes[1].legend(fontsize=8)
         axes[1].grid(True, alpha=0.3)
 
@@ -156,6 +166,14 @@ def plot_compensated(d, cfg, theory, out_dir):
         ax.set_xlabel(r"$z_t$")
         ax.set_ylabel(r"$\mathrm{err} \cdot z_t$")
         ax.set_xscale("log")
+        # Zoom out: y from 0 to 2x the higher theory line
+        theory_lines = []
+        if theory.get("kappa_maj") is not None:
+            theory_lines.append(theory["kappa_maj"] / (1 - cfg.epsilon))
+        if theory.get("kappa_min") is not None:
+            theory_lines.append(theory["kappa_min"] / cfg.epsilon)
+        if theory_lines:
+            ax.set_ylim([0, max(theory_lines) * 2.0])
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
         if alpha < 1.0:
@@ -196,6 +214,12 @@ def plot_rescaled(d, cfg, theory, out_dir):
     ax.set_xlabel(r"$z_t = h \cdot t$")
     ax.set_ylabel("Rescaled error")
     ax.set_xscale("log")
+
+    # Fixed y-axis across all alphas so plateau flatness is visually obvious
+    # and cross-alpha comparison is immediate.
+    # Max theory line is kappa_maj = 0.5 (for alpha >= 1); curves peak ~0.4.
+    ax.set_ylim([0, 0.6])
+
     ax.legend()
     ax.grid(True, alpha=0.3)
 
@@ -216,6 +240,96 @@ def plot_rescaled(d, cfg, theory, out_dir):
     fig.savefig(os.path.join(out_dir, "rescaled_errors.png"), dpi=150)
     fig.savefig(os.path.join(out_dir, "rescaled_errors.pdf"))
     plt.close(fig)
+
+
+# ============================================================
+#  Alpha-sweep overlay (the main paper figure)
+# ============================================================
+
+# Colour palette for the alpha sweep (colourblind-friendly)
+ALPHA_COLORS = {
+    0.5:  "#d62728",   # red
+    0.7:  "#ff7f0e",   # orange
+    1.0:  "#2ca02c",   # green
+    1.3:  "#1f77b4",   # blue
+    1.5:  "#9467bd",   # purple
+    2.0:  "#8c564b",   # brown
+}
+
+def _alpha_color(a):
+    return ALPHA_COLORS.get(a, "black")
+
+
+def plot_alpha_sweep_overlay(all_results, out_dir):
+    """
+    Two-panel overlay of all alpha values on the same axes.
+
+    Panel 1 (left):  z_t * err_maj  for each alpha
+        Majority always decays as 1/z_t, so all curves plateau at
+        kappa_maj(alpha) / (1-eps).  Shows universal 1/z_t structure.
+
+    Panel 2 (right): z_t^{max(1,alpha)} * err_min  for each alpha
+        Each curve is compensated by its own correct exponent, so they
+        all approximately plateau (up to the log correction for alpha >= 1).
+        This is the most direct proof that the exponent is correct across
+        the entire sweep.
+    """
+    ensure_dir(out_dir)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+
+    for res in all_results:
+        cfg = res["cfg"]
+        d = res["data"]
+        theory = res["theory"]
+        z_t = d["z_t"]
+        err_maj = d["err_maj"]
+        err_min = d["err_min"]
+        alpha = cfg.alpha
+        eps = cfg.epsilon
+        col = _alpha_color(alpha)
+
+        # ---- Left panel: z_t * err_maj ----
+        comp_maj = err_maj * z_t
+        axes[0].plot(z_t, comp_maj, color=col, lw=1.5,
+                     label=f"$\\alpha = {alpha:.1f}$")
+
+        # ---- Right panel: z_t^{max(1,alpha)} * err_min ----
+        exponent = max(1.0, alpha)
+        comp_min = err_min * z_t**exponent
+        axes[1].plot(z_t, comp_min, color=col, lw=1.5,
+                     label=f"$\\alpha = {alpha:.1f}$")
+
+    # Left panel formatting
+    axes[0].set_xscale("log")
+    axes[0].set_xlabel(r"$z_t = h \cdot t$")
+    axes[0].set_ylabel(r"$z_t \cdot \mathrm{err}_{\mathrm{maj}}$")
+    axes[0].set_title(r"Majority: compensated by $z_t$"
+                      "\n"
+                      r"(plateau $\Leftrightarrow$ $1/z_t$ decay)")
+    axes[0].set_ylim([0, 1.2])
+    axes[0].legend(fontsize=9, loc="upper left")
+    axes[0].grid(True, alpha=0.3)
+
+    # Right panel formatting
+    axes[1].set_xscale("log")
+    axes[1].set_xlabel(r"$z_t = h \cdot t$")
+    axes[1].set_ylabel(
+        r"$z_t^{\max(1,\alpha)} \cdot \mathrm{err}_{\min}$")
+    axes[1].set_title(r"Minority: compensated by $z_t^{\max(1,\alpha)}$"
+                      "\n"
+                      r"(plateau $\Leftrightarrow$ correct exponent)")
+    axes[1].set_ylim([0, 10])
+    axes[1].legend(fontsize=9, loc="upper left")
+    axes[1].grid(True, alpha=0.3)
+
+    fig.suptitle(r"$\alpha$-sweep overlay ($\varepsilon = 0.1$, "
+                 r"$N = 10^6$)", fontsize=13)
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, "alpha_sweep_overlay.png"), dpi=150)
+    fig.savefig(os.path.join(out_dir, "alpha_sweep_overlay.pdf"))
+    plt.close(fig)
+    print(f"  Alpha-sweep overlay saved to {out_dir}/alpha_sweep_overlay.png")
 
 
 # ============================================================
@@ -357,7 +471,11 @@ def main():
 
         all_results.append({"cfg": cfg, "data": d, "theory": theory})
 
-    # Summary plot
+    # Alpha-sweep overlay (main paper figure)
+    if all_results:
+        plot_alpha_sweep_overlay(all_results, args.out_dir)
+
+    # Summary plot (phase transition)
     if all_results:
         plot_summary(all_results, args.out_dir, args.T_max)
 
