@@ -337,33 +337,45 @@ def plot_alpha_sweep_overlay(all_results, out_dir):
 # ============================================================
 
 def plot_summary(all_results, out_dir, z_max):
-    """Measured decay exponent vs. theoretical alpha."""
+    """Measured decay exponent vs. theoretical alpha.
+
+    Uses log-log linear regression on z_t in [1000, z_regression_max] to
+    avoid both the early transient and the finite-sample floor region.
+    The remaining systematic bias (~5-10%) comes from fitting a pure power
+    law to data that actually follows z_t^{-beta} * (ln z_t)^{beta-1}.
+    """
     ensure_dir(out_dir)
     alphas_theory = []
     exponents_measured_min = []
     exponents_measured_maj = []
+
+    # Regression window: start at z_t=1000 (past transient),
+    # end at min(z_max, 15000) to stay safely above the floor.
+    z_regr_lo = 1000.0
+    z_regr_hi = min(z_max, 15000.0) if z_max else 15000.0
 
     for res in all_results:
         cfg = res["cfg"]
         d = res["data"]
         z_t, err_maj, err_min = d["z_t"], d["err_maj"], d["err_min"]
 
-        if len(z_t) < 50:
+        # Select the regression window
+        regr_mask = (z_t >= z_regr_lo) & (z_t <= z_regr_hi)
+        z_regr = z_t[regr_mask]
+
+        if len(z_regr) < 20:
             continue
 
-        log_z = np.log(z_t)
-        dlog_z = np.diff(log_z)
+        log_z = np.log(z_regr)
 
-        slope_maj = np.diff(np.log(err_maj)) / dlog_z
-        n_tail = max(10, len(slope_maj) // 5)
-        exp_maj = np.median(slope_maj[-n_tail:])
-
-        slope_min = np.diff(np.log(err_min)) / dlog_z
-        exp_min = np.median(slope_min[-n_tail:])
+        # Log-log linear regression: log(err) = a + b * log(z_t)
+        # Exponent = -b
+        b_maj = np.polyfit(log_z, np.log(err_maj[regr_mask]), 1)[0]
+        b_min = np.polyfit(log_z, np.log(err_min[regr_mask]), 1)[0]
 
         alphas_theory.append(cfg.alpha)
-        exponents_measured_maj.append(-exp_maj)
-        exponents_measured_min.append(-exp_min)
+        exponents_measured_maj.append(-b_maj)
+        exponents_measured_min.append(-b_min)
 
     alphas_theory = np.array(alphas_theory)
     exponents_measured_min = np.array(exponents_measured_min)
