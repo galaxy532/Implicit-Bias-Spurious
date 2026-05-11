@@ -87,6 +87,9 @@ def plot_error_ratio(d, cfg, theory, out_dir):
             ax.axhline(expected, color="green", ls="--", lw=1.5,
                        label=f"Theory: {expected:.2f}")
             ax.legend()
+        # y-axis: from 0 to 30% above the theory line (or data max)
+        y_top = max(ratio.max(), expected if theory.get("kappa_min") else ratio.max()) * 1.3
+        ax.set_ylim([0, y_top])
         ax.set_title(f"Error ratio ($\\alpha = {alpha:.2f} < 1$: should converge)")
     else:
         ax.set_yscale("log")
@@ -122,11 +125,16 @@ def plot_compensated(d, cfg, theory, out_dir):
         axes[0].set_ylabel(r"$\mathrm{err} \cdot z_t$")
         axes[0].set_title("Compensated by $z_t$\n(plateau $\\Leftrightarrow$ $1/z_t$ decay)")
         axes[0].set_xscale("log")
+        # Zoom out: y from 0 to 2x the theory line
+        y_top_left = (theory["kappa_maj"] / (1 - cfg.epsilon)) * 2.0 if theory.get("kappa_maj") else None
+        if y_top_left:
+            axes[0].set_ylim([0, y_top_left])
         axes[0].legend(fontsize=8)
         axes[0].grid(True, alpha=0.3)
 
         # Right: err_min * z_t^alpha only
-        axes[1].plot(z_t, err_min * z_t**alpha, "r-", lw=1.5,
+        comp_min_alpha = err_min * z_t**alpha
+        axes[1].plot(z_t, comp_min_alpha, "r-", lw=1.5,
                      label=f"Minority $\\cdot\\, z_t^{{{alpha:.2f}}}$")
         axes[1].set_xlabel(r"$z_t$")
         axes[1].set_ylabel(
@@ -135,6 +143,8 @@ def plot_compensated(d, cfg, theory, out_dir):
             f"Minority compensated by $z_t^{{\\alpha}}$\n"
             f"(plateau $\\Leftrightarrow$ $z_t^{{-\\alpha}}$ decay)")
         axes[1].set_xscale("log")
+        # Zoom out: 0 to 2x the data max
+        axes[1].set_ylim([0, comp_min_alpha.max() * 2.0])
         axes[1].legend(fontsize=8)
         axes[1].grid(True, alpha=0.3)
 
@@ -156,6 +166,14 @@ def plot_compensated(d, cfg, theory, out_dir):
         ax.set_xlabel(r"$z_t$")
         ax.set_ylabel(r"$\mathrm{err} \cdot z_t$")
         ax.set_xscale("log")
+        # Zoom out: y from 0 to 2x the higher theory line
+        theory_lines = []
+        if theory.get("kappa_maj") is not None:
+            theory_lines.append(theory["kappa_maj"] / (1 - cfg.epsilon))
+        if theory.get("kappa_min") is not None:
+            theory_lines.append(theory["kappa_min"] / cfg.epsilon)
+        if theory_lines:
+            ax.set_ylim([0, max(theory_lines) * 2.0])
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
         if alpha < 1.0:
@@ -196,6 +214,12 @@ def plot_rescaled(d, cfg, theory, out_dir):
     ax.set_xlabel(r"$z_t = h \cdot t$")
     ax.set_ylabel("Rescaled error")
     ax.set_xscale("log")
+
+    # Fixed y-axis across all alphas so plateau flatness is visually obvious
+    # and cross-alpha comparison is immediate.
+    # Max theory line is kappa_maj = 0.5 (for alpha >= 1); curves peak ~0.4.
+    ax.set_ylim([0, 0.6])
+
     ax.legend()
     ax.grid(True, alpha=0.3)
 
