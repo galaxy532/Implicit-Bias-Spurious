@@ -6,7 +6,9 @@ Synthetic experiments verifying Theorems 1 & 2 of the paper, using the
 ## Setup
 
 ```bash
-pip install torch numpy matplotlib
+pip install torch numpy matplotlib scipy scikit-learn
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 ```
 
 GPU is optional but recommended for large N. The code auto-detects CUDA.
@@ -110,5 +112,5 @@ z_t^{-1.5}); majority errors fan out ∝ 1/(1−ε).
 ## Compute resources
 
 All experiments were run on a single NVIDIA RTX A6000 GPU (49 GB).
-The α-sweep (N=5M, 10M steps, 6 configs) takes approximately 12–18 hours.
-The ε-sweep (N=1M, 10M steps, 10 configs) takes approximately 10–15 hours.
+The α-sweep (N=5M, 10M steps, 6 configs) takes approximately 2–4 hours.
+The ε-sweep (N=1M, 10M steps, 10 configs) takes approximately 4–6 hours.
