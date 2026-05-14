@@ -144,7 +144,7 @@ def train_sae(model, data_loader, epochs, lr, alpha, device, verbose=True):
 #  Feature classification: r-related vs s-related
 # ============================================================
 
-def classify_features(c_all, digit_classes, intensity_used, threshold=0.1):
+def classify_features(c_all, digit_classes, intensity_used, threshold=0.2):
     """
     Classify each SAE feature as r-related, s-related, or mixed, based on
     Pearson correlation with digit class (proxy for r) and background
