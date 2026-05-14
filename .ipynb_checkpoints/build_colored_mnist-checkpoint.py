@@ -1,24 +1,23 @@
 """
 build_colored_mnist.py
 ----------------------
-Build a colored-MNIST dataset with linear feature-mediated spurious correlation.
+Build a colored-MNIST dataset with feature-mediated spurious correlation.
 
-Data model (matches the paper's Definition 3):
-  r_raw  = raw MNIST digit image (28x28 grayscale, 784-dim vector)
+Data model:
+  r      = raw MNIST digit image (28x28 grayscale)
   y      = 0 if digit in {0,..,4},  1 if digit in {5,..,9}
+  digit_class = 0, 1, ..., 9
 
-  Operator A (maroon background):
-      intensity_A = a^T r_raw   (linear in raw pixels, increases with digit)
-  Operator B (teal background):
-      intensity_B = -a^T r_raw  (= 1 - intensity_A after normalization)
+  Background intensity is a deterministic function of digit class:
+      intensity_A = floor + (1-floor) * digit_class / 9   (increases 0->9)
+      intensity_B = floor + (1-floor) * (1 - digit_class / 9)  (decreases 0->9)
+
+  The mapping from r to intensity is nonlinear (digit class is a nonlinear
+  function of raw pixels), but intensity is perfectly monotonic in digit class.
 
   For each image, independently of y:
       with prob 1-epsilon:  group = 0 (majority),  background = MAROON * intensity_A
       with prob   epsilon:  group = 1 (minority),  background = TEAL   * intensity_B
-
-  The weight vector a is obtained by linear regression of digit class (0-9)
-  on the raw 784-dim pixel vector.  This gives a genuinely linear, continuous
-  mapping from r to background intensity.
 
   After computing the background, the digit foreground is masked and overlaid
   so that the final image has a colored background and a grayscale digit.
@@ -34,7 +33,6 @@ Usage (from Implicit-Bias-Spurious/):
 import os
 import argparse
 import numpy as np
-from sklearn.linear_model import LinearRegression
 from PIL import Image
 
 # torchvision only used for downloading MNIST
@@ -50,55 +48,29 @@ TEAL   = np.array([0, 230, 230], dtype=np.float32)
 
 
 # ============================================================
-#  Core: fit the linear operator and build images
+#  Core: compute intensities from digit class and build images
 # ============================================================
 
-def fit_linear_operator(r_raw, digit_classes):
+def compute_intensities(digit_classes, floor=0.3):
     """
-    Fit a^T r_raw ≈ digit_class via least-squares.
+    Compute background intensities from digit class (0-9).
+
+    intensity_A = floor + (1-floor) * digit_class/9   — increases with digit
+    intensity_B = floor + (1-floor) * (1 - digit_class/9)  — decreases with digit
 
     Parameters
     ----------
-    r_raw : ndarray (N, 784), float32, pixel values in [0, 1]
     digit_classes : ndarray (N,), int, values 0-9
-
-    Returns
-    -------
-    a : ndarray (784,)  — weight vector
-    bias : float        — intercept
-    r2 : float          — R^2 score
-    """
-    reg = LinearRegression()
-    reg.fit(r_raw, digit_classes.astype(np.float32))
-    r2 = reg.score(r_raw, digit_classes.astype(np.float32))
-    return reg.coef_.astype(np.float32), float(reg.intercept_), r2
-
-
-def compute_intensities(r_raw, a, bias, floor=0.15):
-    """
-    Compute background intensities for operators A and B.
-
-    intensity_A = floor + (1-floor) * normalize(a^T r_raw)   — increases with digit
-    intensity_B = floor + (1-floor) * (1 - normalize(a^T r_raw))  — decreases with digit
-
-    Parameters
-    ----------
-    r_raw : ndarray (N, 784)
-    a     : ndarray (784,)
-    bias  : float (unused for intensity, kept for reference)
     floor : float, minimum intensity to avoid pure black backgrounds
 
     Returns
     -------
     intensity_A, intensity_B : ndarray (N,), values in [floor, 1]
-    scores : ndarray (N,), raw a^T r values (for saving)
     """
-    scores = r_raw @ a                                       # (N,)
-    s_min, s_max = scores.min(), scores.max()
-    normed = (scores - s_min) / (s_max - s_min + 1e-12)     # [0, 1]
+    normed = (digit_classes.astype(np.float32)+1) / 10.0          # [0, 1]
     intensity_A = floor + (1 - floor) * normed               # [floor, 1]
     intensity_B = floor + (1 - floor) * (1 - normed)         # [floor, 1]
-    return intensity_A, intensity_B, scores
+    return intensity_A, intensity_B
 
 
 def build_colored_images(all_images, fg_mask, groups,
@@ -196,7 +168,7 @@ def build_showcase(all_images, all_labels, fg_mask,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Build colored-MNIST dataset with linear spurious correlation.")
+        description="Build colored-MNIST dataset with feature-mediated spurious correlation.")
     parser.add_argument("--epsilon", type=float, default=0.1,
                         help="Minority group fraction")
     parser.add_argument("--noise_std", type=float, default=0.0,
@@ -215,7 +187,7 @@ def main():
     # ------------------------------------------------------------------
     #  Load MNIST
     # ------------------------------------------------------------------
-    print("[1/5] Loading MNIST...")
+    print("[1/4] Loading MNIST...")
     train_set = datasets.MNIST(root=os.path.join(args.out_dir, "mnist_raw"),
                                train=True, download=True)
     test_set  = datasets.MNIST(root=os.path.join(args.out_dir, "mnist_raw"),
@@ -229,15 +201,11 @@ def main():
     print(f"  Total images: {N}")
 
     # ------------------------------------------------------------------
-    #  Fit linear operator  a^T r_raw ~ digit_class
+    #  Compute intensities from digit class
     # ------------------------------------------------------------------
-    print("[2/5] Fitting linear operator a^T r_raw ~ digit_class ...")
-    r_raw = all_images.reshape(N, -1).astype(np.float32) / 255.0   # (N, 784)
-    a, bias, r2 = fit_linear_operator(r_raw, all_labels)
-    print(f"  R^2 = {r2:.4f}  (how well a^T r predicts digit class)")
-
-    intensity_A, intensity_B, scores = compute_intensities(
-        r_raw, a, bias, floor=args.intensity_floor)
+    print("[2/4] Computing intensities from digit class...")
+    intensity_A, intensity_B = compute_intensities(
+        all_labels, floor=args.intensity_floor)
     print(f"  Intensity A range: [{intensity_A.min():.3f}, {intensity_A.max():.3f}]")
     print(f"  Intensity B range: [{intensity_B.min():.3f}, {intensity_B.max():.3f}]")
 
@@ -251,7 +219,7 @@ def main():
     # ------------------------------------------------------------------
     #  Assign groups and labels
     # ------------------------------------------------------------------
-    print("[3/5] Assigning groups and labels...")
+    print("[3/4] Assigning groups and labels...")
     groups = (np.random.rand(N) < args.epsilon).astype(np.int64)
     y = (all_labels >= 5).astype(np.int64)
     print(f"  Majority (maroon): {(groups==0).sum()}")
@@ -262,7 +230,7 @@ def main():
     # ------------------------------------------------------------------
     #  Build colored images
     # ------------------------------------------------------------------
-    print("[4/5] Building colored images...")
+    print("[4/4] Building colored images...")
     fg_mask = all_images > args.fg_threshold   # (N, 28, 28)
     colored = build_colored_images(all_images, fg_mask, groups,
                                    intensity_A, intensity_B)
@@ -271,7 +239,7 @@ def main():
     # ------------------------------------------------------------------
     #  Save
     # ------------------------------------------------------------------
-    print("[5/5] Saving...")
+    print("Saving...")
 
     # Save the actual intensity used per sample (depends on group)
     intensity_used = np.where(groups == 0, intensity_A, intensity_B)
@@ -286,10 +254,6 @@ def main():
         intensity_used=intensity_used,  # (N,) actual bg intensity for this sample
         intensity_A=intensity_A,     # (N,) intensity under operator A
         intensity_B=intensity_B,     # (N,) intensity under operator B
-        a_weights=a,                 # (784,) linear operator weights
-        a_bias=np.float32(bias),     # scalar
-        r_raw=r_raw,                 # (N, 784) raw pixel vectors (for reference)
-        scores=scores,               # (N,) raw a^T r values
         epsilon=np.float32(args.epsilon),
         noise_std=np.float32(args.noise_std),
         seed=np.int32(args.seed),

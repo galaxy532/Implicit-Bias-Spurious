@@ -51,7 +51,7 @@ TEAL   = np.array([0, 230, 230], dtype=np.float32)
 #  Core: compute intensities from digit class and build images
 # ============================================================
 
-def compute_intensities(digit_classes, floor=0.15):
+def compute_intensities(digit_classes, floor=0.3):
     """
     Compute background intensities from digit class (0-9).
 
@@ -67,7 +67,7 @@ def compute_intensities(digit_classes, floor=0.15):
     -------
     intensity_A, intensity_B : ndarray (N,), values in [floor, 1]
     """
-    normed = digit_classes.astype(np.float32) / 9.0          # [0, 1]
+    normed = (digit_classes.astype(np.float32)+1) / 10.0          # [0, 1]
     intensity_A = floor + (1 - floor) * normed               # [floor, 1]
     intensity_B = floor + (1 - floor) * (1 - normed)         # [floor, 1]
     return intensity_A, intensity_B
