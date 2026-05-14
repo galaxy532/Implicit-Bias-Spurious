@@ -112,5 +112,5 @@ z_t^{-1.5}); majority errors fan out ∝ 1/(1−ε).
 ## Compute resources
 
 All experiments were run on a single NVIDIA RTX A6000 GPU (49 GB).
-The α-sweep (N=5M, 10M steps, 6 configs) takes approximately 2–4 hours.
+The α-sweep (N=1M, 10M steps, 6 configs) takes approximately 2–4 hours.
 The ε-sweep (N=1M, 10M steps, 10 configs) takes approximately 4–6 hours.
