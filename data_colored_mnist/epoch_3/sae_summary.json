@@ -1,0 +1,24 @@
+{
+  "sae": {
+    "d_in": 128,
+    "d_hid": 512,
+    "dict_ratio": 4,
+    "alpha": 0.01,
+    "epochs": 30,
+    "active_features": 310,
+    "avg_active_per_sample": 55.242442857142855,
+    "variance_explained": 0.9997919797897339
+  },
+  "features": {
+    "n_r": 39,
+    "n_s": 20,
+    "n_dead": 202,
+    "n_weak": 251
+  },
+  "linearity": {
+    "r2_majority": 0.8614953756332397,
+    "r2_minority": 0.9877879023551941,
+    "r2_pooled": 0.893884539604187
+  },
+  "corr_threshold": 0.2
+}

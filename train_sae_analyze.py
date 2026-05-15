@@ -360,8 +360,8 @@ def plot_phi_r_vs_phi_s(c_all, r_idx, s_idx, groups, out_path):
     rng = np.random.RandomState(0)
     max_pts = 3000
     for mask, color, label in [
-        (maj, "tab:blue", "Majority (maroon)"),
-        (mino, "tab:red", "Minority (teal)"),
+        (maj, "maroon", "Majority (maroon)"),
+        (mino, "teal", "Minority (teal)"),
     ]:
         idx = np.where(mask)[0]
         if len(idx) > max_pts:
