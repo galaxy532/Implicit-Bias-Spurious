@@ -2,29 +2,33 @@
 train_sae_analyze.py
 --------------------
 Train a Sparse Autoencoder (SAE) on the MLP representations phi(x) from the
-colored-MNIST experiment, then analyze whether the linear spurious correlation
-s = A r + xi is preserved in the learned representation.
+colored-MNIST experiment, then analyze whether spurious correlation structure
+is preserved in the learned representation.
 
 Pipeline:
   1. Load representations phi(x) and metadata.
   2. Train a tied-weight SAE:  c = ReLU(M phi + b),  phi_hat = M^T c
      with loss = ||phi - phi_hat||^2 + alpha * ||c||_1
-  3. Classify each SAE feature as r-related or s-related by correlating
-     its activation c_k with (a) digit class and (b) background intensity.
-  4. Decompose phi into phi_r and phi_s components:
-       phi_r = [c_k for k in r-features]
-       phi_s = [c_k for k in s-features]
+  3. Classify each SAE feature as r-related or s-related using
+     group-conditional correlations with digit class:
+       rho_0(k) = corr(c_k, d | g=0)   (within majority)
+       rho_1(k) = corr(c_k, d | g=1)   (within minority)
+     Same sign   -> r-feature (tracks digit, invariant to color)
+     Opposite sign -> s-feature (tracks color, flips with group)
+  4. Decompose phi into phi_r and phi_s components.
   5. Fit a linear map phi_r -> phi_s per group and measure R^2.
   6. Produce figures.
 
+Can process a single directory or loop over all epoch_* subdirs:
+    python train_sae_analyze.py --data_dir ./data_colored_mnist/epoch_1
+    python train_sae_analyze.py --data_dir ./data_colored_mnist --run_all_epochs
+
 Reference: Cunningham et al. (2023) "Sparse Autoencoders Find Highly
 Interpretable Features in Language Models" (arXiv:2309.08600).
-
-Usage (from Implicit-Bias-Spurious/):
-    python train_sae_analyze.py --data_dir ./data_colored_mnist
 """
 
 import os
+import glob
 import argparse
 import json
 import numpy as np
@@ -142,57 +146,85 @@ def train_sae(model, data_loader, epochs, lr, alpha, device, verbose=True):
 
 # ============================================================
 #  Feature classification: r-related vs s-related
+#  (group-conditional correlations — avoids the confound
+#   where corr(c_k, intensity) ≈ (1-2ε)*corr(c_k, digit)
+#   because intensity ≈ digit/9 for the majority group)
 # ============================================================
 
-def classify_features(c_all, digit_classes, intensity_used, threshold=0.2):
+def classify_features(c_all, digit_classes, groups, threshold=0.2):
     """
-    Classify each SAE feature as r-related, s-related, or mixed, based on
-    Pearson correlation with digit class (proxy for r) and background
-    intensity (proxy for s).
+    Classify each SAE feature using group-conditional correlations
+    with digit class.
+
+    For each feature k compute:
+      rho_maj(k) = corr(c_k, d | g=0)   — within majority
+      rho_min(k) = corr(c_k, d | g=1)   — within minority
+
+    Within majority: background intensity = d/9 (same direction as d).
+    Within minority: background intensity = 1-d/9 (opposite direction).
+
+    Therefore:
+      same sign   rho_maj, rho_min  ->  r-feature (tracks digit shape)
+      opposite sign                  ->  s-feature (tracks background color)
+
+    Both group-conditional correlations must exceed `threshold` in
+    absolute value for a feature to be classified as r or s.
 
     Parameters
     ----------
     c_all : ndarray (N, d_hid), SAE activations for all samples
     digit_classes : ndarray (N,), 0-9
-    intensity_used : ndarray (N,), actual background intensity
-    threshold : float, minimum |correlation| to assign a feature
+    groups : ndarray (N,), 0=majority, 1=minority
+    threshold : float, minimum |correlation| for significance
 
     Returns
     -------
-    feature_type : list of str, one per feature ('r', 's', 'mixed', 'dead')
-    corr_digit : ndarray (d_hid,), correlation with digit class
-    corr_intensity : ndarray (d_hid,), correlation with intensity
+    feature_type : list of str ('r', 's', 'weak', 'dead')
+    rho_maj : ndarray (d_hid,), within-majority corr with digit class
+    rho_min : ndarray (d_hid,), within-minority corr with digit class
     """
     d_hid = c_all.shape[1]
-    corr_digit = np.zeros(d_hid)
-    corr_intensity = np.zeros(d_hid)
+    rho_maj = np.zeros(d_hid)
+    rho_min = np.zeros(d_hid)
     feature_type = []
+
+    maj_mask = (groups == 0)
+    min_mask = (groups == 1)
+    d_maj = digit_classes[maj_mask].astype(np.float64)
+    d_min = digit_classes[min_mask].astype(np.float64)
 
     for k in range(d_hid):
         ck = c_all[:, k]
-        # Skip dead features (never activate)
+
+        # Dead feature: never activates
         if ck.std() < 1e-8:
-            corr_digit[k] = 0.0
-            corr_intensity[k] = 0.0
             feature_type.append("dead")
             continue
 
-        corr_digit[k] = np.corrcoef(ck, digit_classes)[0, 1]
-        corr_intensity[k] = np.corrcoef(ck, intensity_used)[0, 1]
+        ck_maj = ck[maj_mask]
+        ck_min = ck[min_mask]
 
-        abs_d = abs(corr_digit[k])
-        abs_i = abs(corr_intensity[k])
+        # If the feature has near-zero variance in either group,
+        # we cannot compute a meaningful correlation there
+        if ck_maj.std() < 1e-8 or ck_min.std() < 1e-8:
+            feature_type.append("weak")
+            continue
 
-        if abs_d >= threshold and abs_i < threshold:
-            feature_type.append("r")
-        elif abs_i >= threshold and abs_d < threshold:
-            feature_type.append("s")
-        elif abs_d >= threshold and abs_i >= threshold:
-            feature_type.append("mixed")
+        rho_maj[k] = np.corrcoef(ck_maj, d_maj)[0, 1]
+        rho_min[k] = np.corrcoef(ck_min, d_min)[0, 1]
+
+        abs_0 = abs(rho_maj[k])
+        abs_1 = abs(rho_min[k])
+
+        if min(abs_0, abs_1) >= threshold:
+            if rho_maj[k] * rho_min[k] > 0:       # same sign
+                feature_type.append("r")
+            else:                                   # opposite sign
+                feature_type.append("s")
         else:
             feature_type.append("weak")
 
-    return feature_type, corr_digit, corr_intensity
+    return feature_type, rho_maj, rho_min
 
 
 # ============================================================
@@ -267,25 +299,36 @@ def decompose_and_measure(c_all, feature_type, groups):
 #  Figures
 # ============================================================
 
-def plot_feature_correlations(corr_digit, corr_intensity, feature_type,
-                              out_path):
-    """Scatter plot of per-feature correlations: digit vs intensity."""
-    colors = {"r": "tab:blue", "s": "tab:red", "mixed": "tab:purple",
+def plot_feature_correlations(rho_maj, rho_min, feature_type, out_path):
+    """
+    Scatter plot: within-majority vs within-minority correlation with
+    digit class.  r-features cluster along y=x, s-features along y=-x.
+    """
+    colors = {"r": "tab:blue", "s": "tab:red",
               "weak": "lightgray", "dead": "black"}
 
     fig, ax = plt.subplots(figsize=(7, 6))
-    for ftype in ["weak", "dead", "mixed", "s", "r"]:
+    for ftype in ["weak", "dead", "s", "r"]:
         idx = [k for k, t in enumerate(feature_type) if t == ftype]
         if idx:
-            ax.scatter(corr_digit[idx], corr_intensity[idx],
-                       s=12, alpha=0.6, c=colors[ftype], label=ftype)
+            ax.scatter(rho_maj[idx], rho_min[idx],
+                       s=14, alpha=0.6, c=colors[ftype], label=ftype)
 
+    # Reference lines
+    lim = max(abs(rho_maj).max(), abs(rho_min).max(), 0.5) * 1.1
+    ax.plot([-lim, lim], [-lim, lim], 'k--', lw=0.8, alpha=0.4,
+            label=r"$\rho_0 = \rho_1$ (r)")
+    ax.plot([-lim, lim], [lim, -lim], 'k:', lw=0.8, alpha=0.4,
+            label=r"$\rho_0 = -\rho_1$ (s)")
     ax.axhline(0, color="gray", lw=0.5)
     ax.axvline(0, color="gray", lw=0.5)
-    ax.set_xlabel("Correlation with digit class (r-proxy)", fontsize=11)
-    ax.set_ylabel("Correlation with background intensity (s-proxy)", fontsize=11)
-    ax.set_title("SAE feature classification", fontsize=12)
-    ax.legend(fontsize=9)
+    ax.set_xlabel(r"$\rho_0$ = corr($c_k$, digit | majority)", fontsize=11)
+    ax.set_ylabel(r"$\rho_1$ = corr($c_k$, digit | minority)", fontsize=11)
+    ax.set_title("SAE feature classification (group-conditional)", fontsize=12)
+    ax.legend(fontsize=8, loc="best")
+    ax.set_aspect("equal")
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(-lim, lim)
     plt.tight_layout()
     plt.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close()
@@ -336,48 +379,24 @@ def plot_phi_r_vs_phi_s(c_all, r_idx, s_idx, groups, out_path):
 
 
 # ============================================================
-#  Main
+#  Core processing for one epoch directory
 # ============================================================
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Train SAE on MLP representations and analyze "
-                    "spurious correlation preservation.")
-    parser.add_argument("--data_dir", type=str, default="./data_colored_mnist")
-    parser.add_argument("--out_dir", type=str, default=None)
-    # SAE hyperparameters
-    parser.add_argument("--dict_ratio", type=int, default=4,
-                        help="Ratio of dictionary size to input dim (R)")
-    parser.add_argument("--alpha", type=float, default=1e-3,
-                        help="L1 sparsity coefficient")
-    parser.add_argument("--sae_epochs", type=int, default=30)
-    parser.add_argument("--sae_lr", type=float, default=1e-3)
-    parser.add_argument("--batch_size", type=int, default=512)
-    # Feature classification
-    parser.add_argument("--corr_threshold", type=float, default=0.1,
-                        help="Min |correlation| to classify a feature as r or s")
-    parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
-
-    if args.out_dir is None:
-        args.out_dir = args.data_dir
-    os.makedirs(args.out_dir, exist_ok=True)
+def process_one(data_dir, out_dir, args, device):
+    """Run the full SAE pipeline on one representations.npz."""
+    os.makedirs(out_dir, exist_ok=True)
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Device: {device}")
 
     # ------------------------------------------------------------------
     #  Load representations
     # ------------------------------------------------------------------
     print("[1/5] Loading representations...")
-    rep = np.load(os.path.join(args.data_dir, "representations.npz"))
+    rep = np.load(os.path.join(data_dir, "representations.npz"))
     phi = rep["phi"]                       # (N, 128)
-    y = rep["y"]
     groups = rep["groups"]
     digit_classes = rep["digit_classes"]
-    intensity_used = rep["intensity_used"]
 
     N, d_in = phi.shape
     d_hid = d_in * args.dict_ratio
@@ -396,7 +415,7 @@ def main():
     train_sae(sae, loader, args.sae_epochs, args.sae_lr, args.alpha, device)
 
     # Save SAE
-    sae_path = os.path.join(args.out_dir, "sae_model.pt")
+    sae_path = os.path.join(out_dir, "sae_model.pt")
     torch.save(sae.state_dict(), sae_path)
     print(f"  SAE saved to {sae_path}")
 
@@ -428,16 +447,16 @@ def main():
     print(f"  Variance explained: {frac_explained:.4f}")
 
     # ------------------------------------------------------------------
-    #  Classify features
+    #  Classify features (group-conditional)
     # ------------------------------------------------------------------
-    print("\n[4/5] Classifying SAE features...")
-    feature_type, corr_digit, corr_intensity = classify_features(
-        c_all, digit_classes, intensity_used,
+    print("\n[4/5] Classifying SAE features (group-conditional)...")
+    feature_type, rho_maj, rho_min = classify_features(
+        c_all, digit_classes, groups,
         threshold=args.corr_threshold)
 
     plot_feature_correlations(
-        corr_digit, corr_intensity, feature_type,
-        os.path.join(args.out_dir, "sae_feature_correlations.png"))
+        rho_maj, rho_min, feature_type,
+        os.path.join(out_dir, "sae_feature_correlations.png"))
 
     # ------------------------------------------------------------------
     #  Decompose and measure linearity
@@ -448,7 +467,7 @@ def main():
     if results.get("r_idx") and results.get("s_idx"):
         plot_phi_r_vs_phi_s(
             c_all, results["r_idx"], results["s_idx"], groups,
-            os.path.join(args.out_dir, "phi_r_vs_phi_s.png"))
+            os.path.join(out_dir, "phi_r_vs_phi_s.png"))
 
     # Save summary
     summary = {
@@ -461,7 +480,6 @@ def main():
         },
         "features": {
             "n_r": results["n_r"], "n_s": results["n_s"],
-            "n_mixed": results.get("n_mixed", 0),
             "n_dead": results.get("n_dead", 0),
             "n_weak": results.get("n_weak", 0),
         },
@@ -472,11 +490,76 @@ def main():
         },
         "corr_threshold": args.corr_threshold,
     }
-    summary_path = os.path.join(args.out_dir, "sae_summary.json")
+    summary_path = os.path.join(out_dir, "sae_summary.json")
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
-    print(f"\nSummary saved to {summary_path}")
-    print("Done.")
+    print(f"  Summary saved to {summary_path}")
+    return summary
+
+
+# ============================================================
+#  Main
+# ============================================================
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Train SAE on MLP representations and analyze "
+                    "spurious correlation preservation.")
+    parser.add_argument("--data_dir", type=str, default="./data_colored_mnist",
+                        help="Directory with representations.npz, or parent "
+                             "of epoch_* subdirs when using --run_all_epochs")
+    parser.add_argument("--out_dir", type=str, default=None,
+                        help="Output directory (default: same as data_dir)")
+    parser.add_argument("--run_all_epochs", action="store_true",
+                        help="Loop over all epoch_* subdirs in data_dir")
+    # SAE hyperparameters
+    parser.add_argument("--dict_ratio", type=int, default=4,
+                        help="Ratio of dictionary size to input dim (R)")
+    parser.add_argument("--alpha", type=float, default=0.01,
+                        help="L1 sparsity coefficient")
+    parser.add_argument("--sae_epochs", type=int, default=30)
+    parser.add_argument("--sae_lr", type=float, default=1e-3)
+    parser.add_argument("--batch_size", type=int, default=512)
+    # Feature classification
+    parser.add_argument("--corr_threshold", type=float, default=0.2,
+                        help="Min |correlation| to classify a feature as r or s")
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Device: {device}")
+
+    if args.run_all_epochs:
+        # Find all epoch_* subdirs and process each
+        pattern = os.path.join(args.data_dir, "epoch_*")
+        epoch_dirs = sorted(glob.glob(pattern))
+        if not epoch_dirs:
+            print(f"No epoch_* directories found in {args.data_dir}")
+            return
+        print(f"Found {len(epoch_dirs)} epoch directories: "
+              f"{[os.path.basename(d) for d in epoch_dirs]}\n")
+
+        all_summaries = {}
+        for edir in epoch_dirs:
+            tag = os.path.basename(edir)
+            out = edir if args.out_dir is None else os.path.join(args.out_dir, tag)
+            print(f"\n{'='*60}")
+            print(f"  Processing {tag}")
+            print(f"{'='*60}")
+            summary = process_one(edir, out, args, device)
+            all_summaries[tag] = summary
+
+        # Save combined summary
+        combined_path = os.path.join(args.data_dir, "sae_all_epochs_summary.json")
+        with open(combined_path, "w") as f:
+            json.dump(all_summaries, f, indent=2)
+        print(f"\nCombined summary saved to {combined_path}")
+    else:
+        data_dir = args.data_dir
+        out_dir = args.out_dir if args.out_dir else data_dir
+        process_one(data_dir, out_dir, args, device)
+
+    print("\nAll done.")
 
 
 if __name__ == "__main__":

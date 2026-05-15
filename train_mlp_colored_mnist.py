@@ -2,7 +2,8 @@
 train_mlp_colored_mnist.py
 --------------------------
 Train a multi-layer MLP classifier on the colored-MNIST dataset and extract
-penultimate-layer representations for downstream SAE analysis.
+penultimate-layer representations at multiple training checkpoints for
+downstream SAE analysis.
 
 Architecture:
     input (2352 = 28*28*3) -> 512 -> 256 -> 128 -> 2
@@ -11,11 +12,13 @@ The 128-dim penultimate layer is the representation phi(x) that will be
 fed to the sparse autoencoder.
 
 Outputs (in --out_dir):
-    mlp_model.pt           — trained model state dict
-    representations.npz    — phi(x) for all samples + metadata
+    epoch_1/mlp_model.pt, epoch_1/representations.npz
+    epoch_2/mlp_model.pt, epoch_2/representations.npz
+    ...  (one subfolder per checkpoint epoch)
 
 Usage (from Implicit-Bias-Spurious/):
     python train_mlp_colored_mnist.py --data_dir ./data_colored_mnist
+    python train_mlp_colored_mnist.py --data_dir ./data_colored_mnist --checkpoint_epochs 1,2,3,4,5
 """
 
 import os
@@ -64,35 +67,50 @@ class ColoredMNISTMLP(nn.Module):
 
 
 # ============================================================
-#  Training
+#  Training (one epoch at a time, to allow checkpointing)
 # ============================================================
 
-def train(model, train_loader, epochs, lr, device, verbose=True):
-    """Train with cross-entropy and Adam."""
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
-    criterion = nn.CrossEntropyLoss()
+def train_one_epoch(model, train_loader, optimizer, criterion, device):
+    """Train for one epoch.  Returns (avg_loss, accuracy)."""
     model.train()
+    total_loss, total_correct, total_n = 0.0, 0, 0
+    for X_batch, y_batch in train_loader:
+        X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+        logits = model(X_batch)
+        loss = criterion(logits, y_batch)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item() * X_batch.size(0)
+        total_correct += (logits.argmax(1) == y_batch).sum().item()
+        total_n += X_batch.size(0)
+    return total_loss / total_n, total_correct / total_n
 
-    for epoch in range(1, epochs + 1):
-        total_loss, total_correct, total_n = 0.0, 0, 0
-        for X_batch, y_batch in train_loader:
-            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-            logits = model(X_batch)
-            loss = criterion(logits, y_batch)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item() * X_batch.size(0)
-            total_correct += (logits.argmax(1) == y_batch).sum().item()
-            total_n += X_batch.size(0)
 
-        if verbose and (epoch % 5 == 0 or epoch == 1):
-            acc = total_correct / total_n
-            avg_loss = total_loss / total_n
-            print(f"  Epoch {epoch:>3d}/{epochs}  "
-                  f"loss={avg_loss:.4f}  acc={acc:.4f}")
+def extract_and_save(model, X, metadata, save_dir, device):
+    """Extract representations phi(x) for all samples and save to save_dir."""
+    os.makedirs(save_dir, exist_ok=True)
 
-    return total_correct / total_n
+    # Save model checkpoint
+    torch.save(model.state_dict(), os.path.join(save_dir, "mlp_model.pt"))
+
+    # Extract representations
+    model.eval()
+    N = X.shape[0]
+    phi_list = []
+    for i in range(0, N, 2048):
+        batch = X[i:i+2048].to(device)
+        phi_batch = model.representation(batch)
+        phi_list.append(phi_batch.cpu().numpy())
+    phi = np.concatenate(phi_list, axis=0)
+
+    np.savez_compressed(
+        os.path.join(save_dir, "representations.npz"),
+        phi=phi,
+        **metadata,
+    )
+    print(f"    phi shape: {phi.shape}, nonzero: {(phi > 0).mean():.3f}")
+    return phi
 
 
 def evaluate_per_group(model, X, y, groups, device):
@@ -120,12 +138,16 @@ def evaluate_per_group(model, X, y, groups, device):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train MLP on colored MNIST, extract representations.")
+        description="Train MLP on colored MNIST, extract representations "
+                    "at multiple checkpoints.")
     parser.add_argument("--data_dir", type=str, default="./data_colored_mnist",
                         help="Directory containing colored_mnist.npz")
     parser.add_argument("--out_dir", type=str, default=None,
                         help="Output directory (default: same as data_dir)")
     parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--checkpoint_epochs", type=str, default="1,2,3,4,5",
+                        help="Comma-separated list of epochs at which to save "
+                             "model + representations (default: 1,2,3,4,5)")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--seed", type=int, default=42)
@@ -135,6 +157,8 @@ def main():
         args.out_dir = args.data_dir
     os.makedirs(args.out_dir, exist_ok=True)
 
+    ckpt_epochs = set(int(e) for e in args.checkpoint_epochs.split(","))
+
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -143,7 +167,7 @@ def main():
     # ------------------------------------------------------------------
     #  Load dataset
     # ------------------------------------------------------------------
-    print("[1/4] Loading dataset...")
+    print("[1/3] Loading dataset...")
     data = np.load(os.path.join(args.data_dir, "colored_mnist.npz"))
     images = data["images"]          # (N, 28, 28, 3) uint8
     y      = data["y"]               # (N,) {0, 1}
@@ -160,6 +184,10 @@ def main():
     y_t = torch.from_numpy(y).long()
     groups_t = torch.from_numpy(groups).long()
 
+    # Metadata dict saved alongside each representation checkpoint
+    metadata = dict(y=y, groups=groups, digit_classes=digit_classes,
+                    intensity_used=intensity_used)
+
     # Train/test split (use first 60k for train, last 10k for test)
     X_train, X_test = X[:60000], X[60000:]
     y_train, y_test = y_t[:60000], y_t[60000:]
@@ -170,52 +198,41 @@ def main():
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
 
     # ------------------------------------------------------------------
-    #  Train MLP
+    #  Train MLP with checkpointing
     # ------------------------------------------------------------------
-    print(f"\n[2/4] Training MLP ({args.epochs} epochs, lr={args.lr})...")
+    print(f"\n[2/3] Training MLP ({args.epochs} epochs, lr={args.lr})...")
+    print(f"  Checkpoints at epochs: {sorted(ckpt_epochs)}")
     d_in = X.shape[1]
     model = ColoredMNISTMLP(d_in=d_in).to(device)
-    train(model, train_loader, args.epochs, args.lr, device)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    criterion = nn.CrossEntropyLoss()
 
-    print("\n  Train set:")
+    for epoch in range(1, args.epochs + 1):
+        avg_loss, acc = train_one_epoch(
+            model, train_loader, optimizer, criterion, device)
+
+        if epoch % 5 == 0 or epoch == 1 or epoch in ckpt_epochs:
+            print(f"  Epoch {epoch:>3d}/{args.epochs}  "
+                  f"loss={avg_loss:.4f}  acc={acc:.4f}")
+
+        if epoch in ckpt_epochs:
+            edir = os.path.join(args.out_dir, f"epoch_{epoch}")
+            print(f"  --- Checkpoint epoch {epoch} ---")
+            print("    Train set:")
+            evaluate_per_group(model, X_train, y_train, groups_train, device)
+            print("    Test set:")
+            evaluate_per_group(model, X_test, y_test, groups_test, device)
+            extract_and_save(model, X, metadata, edir, device)
+            print(f"    Saved to {edir}")
+
+    # ------------------------------------------------------------------
+    #  Final evaluation
+    # ------------------------------------------------------------------
+    print(f"\n[3/3] Final evaluation (epoch {args.epochs})...")
+    print("  Train set:")
     evaluate_per_group(model, X_train, y_train, groups_train, device)
     print("  Test set:")
     evaluate_per_group(model, X_test, y_test, groups_test, device)
-
-    # ------------------------------------------------------------------
-    #  Save model
-    # ------------------------------------------------------------------
-    print("\n[3/4] Saving model...")
-    model_path = os.path.join(args.out_dir, "mlp_model.pt")
-    torch.save(model.state_dict(), model_path)
-    print(f"  Model saved to {model_path}")
-
-    # ------------------------------------------------------------------
-    #  Extract representations phi(x) for ALL samples
-    # ------------------------------------------------------------------
-    print("\n[4/4] Extracting representations...")
-    model.eval()
-    phi_list = []
-    bs = 2048
-    for i in range(0, N, bs):
-        batch = X[i:i+bs].to(device)
-        phi_batch = model.representation(batch)
-        phi_list.append(phi_batch.cpu().numpy())
-
-    phi = np.concatenate(phi_list, axis=0)   # (N, 128)
-    print(f"  Representation shape: {phi.shape}")
-    print(f"  Nonzero fraction: {(phi > 0).mean():.3f}")
-
-    rep_path = os.path.join(args.out_dir, "representations.npz")
-    np.savez_compressed(
-        rep_path,
-        phi=phi,                         # (N, 128)
-        y=y,                             # (N,)
-        groups=groups,                   # (N,)
-        digit_classes=digit_classes,     # (N,)
-        intensity_used=intensity_used,   # (N,)
-    )
-    print(f"  Representations saved to {rep_path}")
     print("\nDone.")
 
 
