@@ -3,22 +3,22 @@
     "d_in": 128,
     "d_hid": 512,
     "dict_ratio": 4,
-    "alpha": 0.01,
+    "alpha": 0.03,
     "epochs": 30,
-    "active_features": 308,
-    "avg_active_per_sample": 47.29844285714286,
-    "variance_explained": 0.9997201561927795
+    "active_features": 301,
+    "avg_active_per_sample": 16.43407142857143,
+    "variance_explained": 0.9996103048324585
   },
   "features": {
-    "n_r": 28,
-    "n_s": 16,
-    "n_dead": 204,
-    "n_weak": 264
+    "n_r": 8,
+    "n_s": 1,
+    "n_dead": 211,
+    "n_weak": 292
   },
   "linearity": {
-    "r2_majority": 0.900935709476471,
-    "r2_minority": 0.9579448699951172,
-    "r2_pooled": 0.880959689617157
+    "r2_majority": 0.6694338917732239,
+    "r2_minority": 0.4166750907897949,
+    "r2_pooled": 0.4495580196380615
   },
   "corr_threshold": 0.2
 }
