@@ -20,5 +20,22 @@
     "r2_minority": 0.9971754550933838,
     "r2_pooled": 0.9788912534713745
   },
-  "corr_threshold": 0.2
+  "corr_threshold": 0.2,
+  "null_test": {
+    "majority_observed": 0.7771468162536621,
+    "majority_null_mean": 0.0002885611474484904,
+    "majority_null_std": 7.714448670235563e-05,
+    "majority_p_value": 0.0,
+    "majority_n_perm": 1000,
+    "minority_observed": 0.9971754550933838,
+    "minority_null_mean": 0.0013096261832979508,
+    "minority_null_std": 0.0005486914754092681,
+    "minority_p_value": 0.0,
+    "minority_n_perm": 1000,
+    "pooled_observed": 0.9788901805877686,
+    "pooled_null_mean": 0.0001720037280347242,
+    "pooled_null_std": 7.958294326957809e-05,
+    "pooled_p_value": 0.0,
+    "pooled_n_perm": 1000
+  }
 }

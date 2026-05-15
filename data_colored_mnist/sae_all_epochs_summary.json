@@ -21,7 +21,24 @@
       "r2_minority": 0.4166750907897949,
       "r2_pooled": 0.4495580196380615
     },
-    "corr_threshold": 0.2
+    "corr_threshold": 0.2,
+    "null_test": {
+      "majority_observed": 0.6694338917732239,
+      "majority_null_mean": 0.00011509323113386926,
+      "majority_null_std": 5.649643913797754e-05,
+      "majority_p_value": 0.0,
+      "majority_n_perm": 1000,
+      "minority_observed": 0.4166750907897949,
+      "minority_null_mean": 0.0009727053038805025,
+      "minority_null_std": 0.000570510122256077,
+      "minority_p_value": 0.0,
+      "minority_n_perm": 1000,
+      "pooled_observed": 0.44955796003341675,
+      "pooled_null_mean": 0.00010722130535577889,
+      "pooled_null_std": 5.619095248989162e-05,
+      "pooled_p_value": 0.0,
+      "pooled_n_perm": 1000
+    }
   },
   "epoch_2": {
     "sae": {
@@ -45,7 +62,24 @@
       "r2_minority": 0.9773625731468201,
       "r2_pooled": 0.48427483439445496
     },
-    "corr_threshold": 0.2
+    "corr_threshold": 0.2,
+    "null_test": {
+      "majority_observed": 0.7918605804443359,
+      "majority_null_mean": 0.0002203555765445344,
+      "majority_null_std": 5.9704951564320174e-05,
+      "majority_p_value": 0.0,
+      "majority_n_perm": 1000,
+      "minority_observed": 0.9773625731468201,
+      "minority_null_mean": 0.0020654172034119257,
+      "minority_null_std": 0.0006591139840409835,
+      "minority_p_value": 0.0,
+      "minority_n_perm": 1000,
+      "pooled_observed": 0.4844921827316284,
+      "pooled_null_mean": 0.000687270387657918,
+      "pooled_null_std": 7.58919132276946e-05,
+      "pooled_p_value": 0.0,
+      "pooled_n_perm": 1000
+    }
   },
   "epoch_3": {
     "sae": {
@@ -69,7 +103,24 @@
       "r2_minority": 0.9978929758071899,
       "r2_pooled": 0.7930412292480469
     },
-    "corr_threshold": 0.2
+    "corr_threshold": 0.2,
+    "null_test": {
+      "majority_observed": 0.41456931829452515,
+      "majority_null_mean": 0.00022924689637875416,
+      "majority_null_std": 4.9339695051921274e-05,
+      "majority_p_value": 0.0,
+      "majority_n_perm": 1000,
+      "minority_observed": 0.9978929758071899,
+      "minority_null_mean": 0.0008525384768654476,
+      "minority_null_std": 0.00046200653656882046,
+      "minority_p_value": 0.0,
+      "minority_n_perm": 1000,
+      "pooled_observed": 0.792988657951355,
+      "pooled_null_mean": -0.00013008395295344144,
+      "pooled_null_std": 5.6376824052782944e-05,
+      "pooled_p_value": 0.0,
+      "pooled_n_perm": 1000
+    }
   },
   "epoch_4": {
     "sae": {
@@ -93,7 +144,24 @@
       "r2_minority": 0.9975274205207825,
       "r2_pooled": 0.2228008657693863
     },
-    "corr_threshold": 0.2
+    "corr_threshold": 0.2,
+    "null_test": {
+      "majority_observed": 0.38174542784690857,
+      "majority_null_mean": 0.0005281724386732094,
+      "majority_null_std": 6.544758768541638e-05,
+      "majority_p_value": 0.0,
+      "majority_n_perm": 1000,
+      "minority_observed": 0.9975274205207825,
+      "minority_null_mean": 0.0014909892176219728,
+      "minority_null_std": 0.0006003158532137214,
+      "minority_p_value": 0.0,
+      "minority_n_perm": 1000,
+      "pooled_observed": 0.22283276915550232,
+      "pooled_null_mean": 0.0002741344472451601,
+      "pooled_null_std": 8.993618227220171e-05,
+      "pooled_p_value": 0.0,
+      "pooled_n_perm": 1000
+    }
   },
   "epoch_5": {
     "sae": {
@@ -117,6 +185,23 @@
       "r2_minority": 0.9971754550933838,
       "r2_pooled": 0.9788912534713745
     },
-    "corr_threshold": 0.2
+    "corr_threshold": 0.2,
+    "null_test": {
+      "majority_observed": 0.7771468162536621,
+      "majority_null_mean": 0.0002885611474484904,
+      "majority_null_std": 7.714448670235563e-05,
+      "majority_p_value": 0.0,
+      "majority_n_perm": 1000,
+      "minority_observed": 0.9971754550933838,
+      "minority_null_mean": 0.0013096261832979508,
+      "minority_null_std": 0.0005486914754092681,
+      "minority_p_value": 0.0,
+      "minority_n_perm": 1000,
+      "pooled_observed": 0.9788901805877686,
+      "pooled_null_mean": 0.0001720037280347242,
+      "pooled_null_std": 7.958294326957809e-05,
+      "pooled_p_value": 0.0,
+      "pooled_n_perm": 1000
+    }
   }
 }
