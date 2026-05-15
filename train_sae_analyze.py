@@ -17,7 +17,9 @@ Pipeline:
      Opposite sign -> s-feature (tracks color, flips with group)
   4. Decompose phi into phi_r and phi_s components.
   5. Fit a linear map phi_r -> phi_s per group and measure R^2.
-  6. Produce figures.
+  6. (Optional) Permutation test: shuffle phi_s rows within each group
+     to obtain a null distribution of R^2, yielding a p-value.
+  7. Produce figures.
 
 Can process a single directory or loop over all epoch_* subdirs:
     python train_sae_analyze.py --data_dir ./data_colored_mnist/epoch_1
@@ -296,6 +298,90 @@ def decompose_and_measure(c_all, feature_type, groups):
 
 
 # ============================================================
+#  Null-distribution control (permutation test)
+# ============================================================
+
+def permutation_test_linearity(phi_r, phi_s, groups, n_perm=1000, seed=42):
+    """
+    Permutation test for the linear relationship phi_r -> phi_s.
+
+    For each group g in {0 (majority), 1 (minority)} and for pooled data:
+      1. Compute the observed R^2 from Ridge(phi_r -> phi_s).
+      2. Repeat n_perm times: shuffle the *rows* of phi_s (as a block,
+         preserving the internal correlation structure of phi_s) within
+         the group, refit Ridge, record R^2.
+      3. Report observed R^2, null mean, null std, and empirical p-value
+         (fraction of null R^2 >= observed R^2).
+
+    The permutation is done *within* each group so that group sizes and
+    marginal distributions are preserved — we test purely whether the
+    sample-to-sample alignment between phi_r and phi_s matters.
+
+    Parameters
+    ----------
+    phi_r : ndarray (N, n_r)
+    phi_s : ndarray (N, n_s)
+    groups : ndarray (N,), 0=majority, 1=minority
+    n_perm : int, number of permutations
+    seed : int
+
+    Returns
+    -------
+    results : dict with keys like 'majority_observed', 'majority_null_mean',
+              'majority_null_std', 'majority_p_value', and similarly for
+              'minority' and 'pooled'.
+    """
+    rng = np.random.RandomState(seed)
+    results = {}
+
+    def _fit_r2(X, Y):
+        """Ridge R^2 for X -> Y (multi-output, variance-weighted)."""
+        probe = Ridge(alpha=1.0)
+        probe.fit(X, Y)
+        Y_hat = probe.predict(X)
+        return r2_score(Y, Y_hat, multioutput="variance_weighted")
+
+    # Per-group + pooled
+    configs = [
+        ("majority", groups == 0),
+        ("minority", groups == 1),
+        ("pooled",   np.ones(len(groups), dtype=bool)),
+    ]
+
+    for name, mask in configs:
+        n_g = mask.sum()
+        if n_g < 10:
+            print(f"    Permutation test ({name}): skipped (n={n_g})")
+            continue
+
+        Xg = phi_r[mask]
+        Yg = phi_s[mask]
+
+        observed_r2 = _fit_r2(Xg, Yg)
+
+        null_r2s = np.zeros(n_perm)
+        for p in range(n_perm):
+            perm_idx = rng.permutation(n_g)
+            Yg_perm = Yg[perm_idx]       # shuffle rows as a block
+            null_r2s[p] = _fit_r2(Xg, Yg_perm)
+
+        p_value = (null_r2s >= observed_r2).mean()
+
+        results[f"{name}_observed"] = float(observed_r2)
+        results[f"{name}_null_mean"] = float(null_r2s.mean())
+        results[f"{name}_null_std"] = float(null_r2s.std())
+        results[f"{name}_p_value"] = float(p_value)
+        results[f"{name}_n_perm"] = n_perm
+
+        print(f"    Permutation test ({name}):  "
+              f"R²={observed_r2:.4f}  "
+              f"null={null_r2s.mean():.4f}±{null_r2s.std():.4f}  "
+              f"p={p_value:.4f}")
+
+    return results
+
+
+# ============================================================
 #  Figures
 # ============================================================
 
@@ -392,7 +478,7 @@ def process_one(data_dir, out_dir, args, device):
     # ------------------------------------------------------------------
     #  Load representations
     # ------------------------------------------------------------------
-    print("[1/5] Loading representations...")
+    print("[1/6] Loading representations...")
     rep = np.load(os.path.join(data_dir, "representations.npz"))
     phi = rep["phi"]                       # (N, 128)
     groups = rep["groups"]
@@ -409,7 +495,7 @@ def process_one(data_dir, out_dir, args, device):
     # ------------------------------------------------------------------
     #  Train SAE
     # ------------------------------------------------------------------
-    print(f"\n[2/5] Training SAE (alpha={args.alpha}, "
+    print(f"\n[2/6] Training SAE (alpha={args.alpha}, "
           f"{args.sae_epochs} epochs)...")
     sae = SparseAutoencoder(d_in=d_in, d_hid=d_hid).to(device)
     train_sae(sae, loader, args.sae_epochs, args.sae_lr, args.alpha, device)
@@ -422,7 +508,7 @@ def process_one(data_dir, out_dir, args, device):
     # ------------------------------------------------------------------
     #  Encode all samples
     # ------------------------------------------------------------------
-    print("\n[3/5] Encoding all samples through SAE...")
+    print("\n[3/6] Encoding all samples through SAE...")
     sae.eval()
     c_list = []
     with torch.no_grad():
@@ -449,7 +535,7 @@ def process_one(data_dir, out_dir, args, device):
     # ------------------------------------------------------------------
     #  Classify features (group-conditional)
     # ------------------------------------------------------------------
-    print("\n[4/5] Classifying SAE features (group-conditional)...")
+    print("\n[4/6] Classifying SAE features (group-conditional)...")
     feature_type, rho_maj, rho_min = classify_features(
         c_all, digit_classes, groups,
         threshold=args.corr_threshold)
@@ -461,13 +547,27 @@ def process_one(data_dir, out_dir, args, device):
     # ------------------------------------------------------------------
     #  Decompose and measure linearity
     # ------------------------------------------------------------------
-    print("\n[5/5] Decomposing phi into phi_r and phi_s...")
+    print("\n[5/6] Decomposing phi into phi_r and phi_s...")
     results = decompose_and_measure(c_all, feature_type, groups)
 
     if results.get("r_idx") and results.get("s_idx"):
         plot_phi_r_vs_phi_s(
             c_all, results["r_idx"], results["s_idx"], groups,
             os.path.join(out_dir, "phi_r_vs_phi_s.png"))
+
+    # ------------------------------------------------------------------
+    #  Permutation test (null-distribution control)
+    # ------------------------------------------------------------------
+    null_test_results = {}
+    if args.n_perm > 0 and results.get("r_idx") and results.get("s_idx"):
+        print(f"\n[6/6] Permutation test ({args.n_perm} permutations)...")
+        phi_r = c_all[:, results["r_idx"]]
+        phi_s = c_all[:, results["s_idx"]]
+        null_test_results = permutation_test_linearity(
+            phi_r, phi_s, groups,
+            n_perm=args.n_perm, seed=args.seed)
+    elif args.n_perm == 0:
+        print("\n[6/6] Permutation test: skipped (--n_perm 0)")
 
     # Save summary
     summary = {
@@ -490,6 +590,9 @@ def process_one(data_dir, out_dir, args, device):
         },
         "corr_threshold": args.corr_threshold,
     }
+    if null_test_results:
+        summary["null_test"] = null_test_results
+
     summary_path = os.path.join(out_dir, "sae_summary.json")
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
@@ -524,6 +627,10 @@ def main():
     parser.add_argument("--corr_threshold", type=float, default=0.2,
                         help="Min |correlation| to classify a feature as r or s")
     parser.add_argument("--seed", type=int, default=42)
+    # Permutation test
+    parser.add_argument("--n_perm", type=int, default=0,
+                        help="Number of permutations for null-distribution "
+                             "control (0 = skip, e.g. 1000)")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
