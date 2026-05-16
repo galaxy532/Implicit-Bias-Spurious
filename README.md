@@ -1,19 +1,26 @@
 # Experiments: Implicit Bias of GD under Spurious Correlations
 
-Synthetic experiments verifying Theorems 1 & 2 of the paper, using the
-**Tabular + Vendor Score** setup (isotropic regime by construction).
+This directory contains two experiment suites:
+
+1. **Tabular + Vendor Score** — synthetic experiments verifying Theorems 1 & 2 (isotropic regime).
+2. **Colored MNIST + SAE Feature Analysis** — empirical evidence that nonlinear feature-mediated correlations linearise in learned representations (Appendix B).
 
 ## Setup
 
 ```bash
-pip install torch numpy matplotlib scipy scikit-learn
+pip install torch torchvision numpy matplotlib scipy scikit-learn
+# For GPU support:
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 ```
 
 GPU is optional but recommended for large N. The code auto-detects CUDA.
 
-## Scripts
+---
+
+## Part 1: Tabular + Vendor Score (Theorems 1 & 2)
+
+### Scripts
 
 | Script | Purpose |
 |--------|---------|
@@ -109,8 +116,95 @@ collapse onto κ_min regardless of ε.
 **ε-sweep (α = 1.5):** Minority raw errors collapse (ε-independent rate
 z_t^{-1.5}); majority errors fan out ∝ 1/(1−ε).
 
+---
+
+## Part 2: Colored MNIST + SAE Feature Analysis (Appendix B)
+
+This experiment tests whether a nonlinear feature-mediated spurious correlation
+becomes linear in a learned representation. A colored-MNIST dataset is
+constructed where background intensity depends on digit class (a nonlinear
+function of raw pixels) with group-specific direction (majority: increasing,
+minority: decreasing). An MLP is trained, representations are extracted at
+early checkpoints, and Sparse Autoencoders (SAEs) decompose them into
+causal (r) and spurious (s) features. A Ridge regression φ_r → φ_s is
+fit per group, with a permutation test as null-distribution control.
+
+### Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `build_colored_mnist.py` | Build the colored-MNIST dataset (N=70k, ε=0.1) |
+| `train_mlp_colored_mnist.py` | Train MLP with checkpoints at epochs 1–5 |
+| `train_sae_analyze.py` | Train SAE, classify features, measure linearity, permutation test |
+
+### Quick run
+
+```bash
+# 1. Build dataset
+python build_colored_mnist.py --epsilon 0.1 --out_dir ./data_colored_mnist
+
+# 2. Train MLP with checkpoints
+python train_mlp_colored_mnist.py --data_dir ./data_colored_mnist --checkpoint_epochs 1,2,3,4,5
+
+# 3. Run SAE analysis on all checkpoints (with 1000-permutation null test)
+python train_sae_analyze.py --data_dir ./data_colored_mnist --run_all_epochs --alpha 0.03 --n_perm 1000
+```
+
+### Data model
+
+Each MNIST image receives a colored background whose intensity is a
+deterministic function of digit class:
+
+- **Majority (maroon, 90%):** intensity = floor + (1−floor) · (digit+1)/10 (increases with digit)
+- **Minority (teal, 10%):** intensity = floor + (1−floor) · (1 − (digit+1)/10) (decreases with digit)
+
+The label is y = 1[digit ≥ 5]. The digit foreground is grayscale; only the
+background carries the spurious signal. The spurious feature depends on the
+*value* of the causal feature (digit class), not merely on y — making this a
+feature-mediated spurious correlation with a nonlinear input-space map.
+
+### SAE feature classification
+
+Each SAE feature c_k is classified using group-conditional correlations with
+digit class d ∈ {0,…,9}:
+
+- ρ₀(k) = corr(c_k, d | g=0), ρ₁(k) = corr(c_k, d | g=1)
+- Same sign → r-feature (tracks digit shape, invariant to color)
+- Opposite sign → s-feature (tracks background color, flips with group)
+- Threshold |ρ| ≥ 0.2 for classification
+
+### File structure
+
+```
+data_colored_mnist/
+├── colored_mnist.npz                    # Full dataset (70k images)
+├── showcase_colored_mnist.png           # 2-row sample image (manuscript figure)
+├── sae_all_epochs_summary.json          # Combined results across all epochs
+├── mnist_raw/                           # Downloaded MNIST
+└── epoch_{1..5}/
+    ├── mlp_model.pt                     # MLP checkpoint
+    ├── representations.npz              # 128-dim penultimate activations φ(x)
+    ├── sae_model.pt                     # Trained SAE
+    ├── sae_summary.json                 # Per-epoch results (R², null test, etc.)
+    ├── sae_feature_correlations.png     # (ρ₀, ρ₁) scatter plot
+    └── phi_r_vs_phi_s.png              # First PC of φ_r vs φ_s, by group
+```
+
+### Expected results
+
+- **Minority R²:** saturates near 1.0 from epoch 2 onward (near-perfect linear φ_r → φ_s map).
+- **Majority R²:** lower and variable (0.38–0.79), but 3 orders of magnitude above the null baseline (~0.0001–0.0005).
+- **Permutation test:** all p-values < 0.001 (1000 permutations), confirming the linear relationship is genuine.
+- **φ_r vs φ_s scatter:** minority forms a tight linear cloud with clear slope; majority is flat near φ_s ≈ 0. Slope sign alternates across epochs (SVD sign ambiguity — cosmetic, does not affect R²).
+
+---
+
 ## Compute resources
 
-All experiments were run on a single NVIDIA RTX A6000 GPU (49 GB).
+**Tabular experiments:** all run on a single NVIDIA RTX A6000 GPU (49 GB).
 The α-sweep (N=1M, 10M steps, 6 configs) takes approximately 2–4 hours.
 The ε-sweep (N=1M, 10M steps, 10 configs) takes approximately 4–6 hours.
+
+**Colored MNIST:** runs on CPU in ~10 minutes (dataset build + MLP training +
+SAE analysis across 5 epochs). The permutation test (1000 permutations × 5
+epochs × 3 groups) adds ~5 minutes.
